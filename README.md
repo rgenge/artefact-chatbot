@@ -73,4 +73,3 @@ A base é um snapshot local e não há autenticação real de cliente. O índice
 =======
 # artefact-chatbot
 Chatbot with RAG system using gemini 3.1 for a store.
->>>>>>> 94b085f10f7a775b715841b5a3ae8d1d6070f8a6
