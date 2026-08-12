@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Empório da Música — agente Gemini
 
 Protótipo Python do agente de atendimento pedido no desafio. A arquitetura segue o processo do TwinTweaker:
@@ -70,3 +71,7 @@ Veja [examples/conversations.md](examples/conversations.md) para os cenários ex
 
 A base é um snapshot local e não há autenticação real de cliente. O índice de embeddings é reconstruído ao iniciar o processo, em vez de persistir em pgvector/Supabase como no TwinTweaker. Em produção eu persistiria chunks e embeddings, adicionaria atualização incremental, observabilidade, handoff humano e avaliação contínua de recall/grounding.
 
+=======
+# artefact-chatbot
+Chatbot with RAG system using gemini 3.1 for a store.
+>>>>>>> 94b085f10f7a775b715841b5a3ae8d1d6070f8a6
