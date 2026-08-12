@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Empório da Música — agente Gemini
 
 Protótipo Python do agente de atendimento pedido no desafio. A arquitetura segue o processo do TwinTweaker:
