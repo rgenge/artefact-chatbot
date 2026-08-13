@@ -311,6 +311,35 @@ class StoreAgentTests(unittest.TestCase):
         answer = agent.handle("e quais mais?")
         self.assertIn("Sim, há mais violões disponíveis", answer)
         self.assertNotIn("Pode reformular", answer)
+    def test_what_do_you_sell_lists_families_not_every_product(self):
+        agent = StoreAgent(DATA, use_llm=False)
+        answer = agent.handle("que tipo de produtos vendem ?")
+        self.assertIn("famílias de instrumentos", answer)
+        self.assertIn("Violões: 33 modelo(s)", answer)
+        self.assertIn("Ukuleles", answer)
+        # The old behaviour dumped a price list of individual products.
+        self.assertNotIn("R$", answer)
+
+    def test_bare_types_follow_up_is_not_unknown(self):
+        agent = StoreAgent(DATA, use_llm=False)
+        answer = agent.handle("Quais tipos ?")
+        self.assertIn("famílias de instrumentos", answer)
+        self.assertNotIn("reformular", answer)
+
+    def test_named_family_still_lists_products(self):
+        # "tipos" plus a family must stay a product search, not the overview.
+        agent = StoreAgent(DATA, use_llm=False)
+        answer = agent.handle("Quais tipos de violão vocês tem?")
+        self.assertIn("violões disponíveis", answer)
+        self.assertNotIn("famílias de instrumentos", answer)
+
+    def test_conjugated_parcelar_reaches_the_payment_policy(self):
+        for question in ("parcelam em que formas ?", "vocês parcelam?", "em quantas parcelas?"):
+            agent = StoreAgent(DATA, use_llm=False)
+            answer = agent.handle(question)
+            self.assertIn("12x sem juros", answer, msg=question)
+            self.assertNotIn("reformular", answer, msg=question)
+
     def test_accessory_scope_is_explicit(self):
         agent = StoreAgent(DATA, use_llm=False)
         answer = agent.handle("Vocês vendem cabos e palhetas?")

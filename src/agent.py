@@ -44,6 +44,22 @@ CHECKOUT_PATTERNS = (
     r"\b(?:quero|gostaria de|posso)\s+(?:comprar|adquirir|levar)\b",
 )
 
+# "What do you sell?" asks for the shape of the catalog, not 61 product rows.
+# The honest answer is the category list, which is also short enough to read.
+CATEGORY_OVERVIEW_PATTERNS = (
+    r"\b(?:que|quais|qual)\s+(?:os\s+|as\s+)?tipos?\b",
+    r"\btipos?\s+de\s+(?:produto|produtos|instrumento|instrumentos|coisa|coisas)\b",
+    r"\b(?:que|quais)\s+categorias?\b",
+    r"\bo\s+que\s+(?:voces|vcs?|a\s+loja)?\s*vend(?:em|e)\b",
+    r"\b(?:que|quais)\s+(?:tipo de\s+)?(?:produtos|instrumentos)\s+(?:voces\s+|vcs?\s+)?vend(?:em|e)\b",
+)
+
+
+def is_category_overview(message: str) -> bool:
+    normalized = normalize(message)
+    return any(re.search(pattern, normalized) for pattern in CATEGORY_OVERVIEW_PATTERNS)
+
+
 # Readable version of HANDOFF_PATTERNS, rendered by the web UI. Keep both lists
 # aligned: this is what the customer reads to know what reaches a human.
 HANDOFF_TRIGGER_LABELS = (
@@ -478,12 +494,46 @@ dados pessoais além do necessário para responder ao próprio cliente.
         answer += " O retorno acontece em até 24 horas úteis, no horário de atendimento."
         return answer, []
 
+    def _category_overview(self) -> tuple[str, list[RetrievedChunk]]:
+        counts: dict[int, int] = {}
+        for item in self.store.products:
+            if item.available:
+                counts[item.category_id] = counts.get(item.category_id, 0) + 1
+        rows = sorted(
+            ((self.store.category_name(cid), total) for cid, total in counts.items()),
+            key=lambda pair: (-pair[1], pair[0]),
+        )
+        if not rows:
+            return "Não encontrei produtos disponíveis no catálogo agora.", []
+        lines = ["Trabalhamos com estas famílias de instrumentos:"]
+        lines += [f"- {name}: {total} modelo(s) disponíveis." for name, total in rows]
+        lines.append("Me diga a família que te interessa e eu listo os modelos.")
+        return "\n".join(lines), [
+            RetrievedChunk(
+                title="Categorias do catálogo",
+                source_type="catalog_row",
+                content="\n".join(f"{name}: {total} disponíveis" for name, total in rows),
+                score=12.0,
+                retrieval="structured",
+            )
+        ]
+
     def _catalog_answer(self, message: str) -> tuple[str, list[RetrievedChunk]]:
         category_id = self.store.category_id_for(message)
         max_price = parse_budget(message)
         product = self.store.best_product_match(message)
         words = keyword_set(message)
         query_norm = normalize(message)
+
+        # Asked what the store sells, with no family named: answer with families.
+        if (
+            is_category_overview(message)
+            and category_id is None
+            and product is None
+            and max_price is None
+        ):
+            self.last_selected_product = None
+            return self._category_overview()
 
         brand_products = self.store.brand_products(
             message, category_id=category_id, max_price=max_price
@@ -943,7 +993,8 @@ def route_message(message: str, store: CatalogStore, *, allow_handoff: bool = Tr
         return "policy"
 
     catalog_signal = bool(
-        words & {
+        is_category_overview(message)
+        or words & {
             "preco", "custa", "valor", "estoque", "disponivel", "disponibilidade",
             "opcoes", "produto", "catalogo", "promocao", "promocoes", "desconto",
             "descontos", "oferta", "ofertas", "especial", "especiais", "exclusivo", "exclusiva", "black", "friday", "tem",
