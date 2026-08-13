@@ -360,6 +360,25 @@ class StoreAgentTests(unittest.TestCase):
         self.assertIn("parcela mínima de R$ 100,00", payment)
         self.assertNotIn("Pode reformular", payment)
 
+    def test_return_acknowledgements_keep_policy_context(self):
+        agent = StoreAgent(DATA, use_llm=False)
+        policy_queries = []
+        agent.rag.search = lambda query: policy_queries.append(query) or []
+
+        first = agent.handle("Comprei uma bateria Pearl há 4 dias e queria devolver")
+        self.assertIn("7 dias corridos", first)
+
+        confirmed = agent.handle("sim")
+        self.assertIn("número do pedido", confirmed)
+        self.assertIn("10 dias úteis", confirmed)
+
+        next_steps = agent.handle("quais próximos passos para devolução?")
+        self.assertIn("frete de devolução é por conta da loja", next_steps)
+
+        final = agent.handle("sim, o que fazer agora?")
+        self.assertIn("solicitação ser formalizada", final)
+        self.assertNotIn("Pode reformular", final)
+        self.assertTrue(any("devolver" in query.lower() for query in policy_queries))
     def test_natural_more_question_uses_previous_catalog_turn(self):
         agent = StoreAgent(DATA, use_llm=False)
         agent.handle("Quais violões tem?")

@@ -96,6 +96,7 @@ dados pessoais além do necessário para responder ao próprio cliente.
         self.last_catalog_label = "produtos"
         self.last_catalog_query = ""
         self.last_intent: Optional[str] = None
+        self.last_policy_query = ""
         self.last_selected_product: Optional[Product] = None
         self.checkout_active = False
         self.checkout_product_id: Optional[int] = None
@@ -126,9 +127,7 @@ dados pessoais além do necessário para responder ao próprio cliente.
         if not message:
             return "Pode me contar como posso ajudar?"
         self._remember_customer(message)
-        # Retrieve policy evidence before routing. Exact catalog fields still use
-        # deterministic CSV queries, but policy context guides ambiguous turns.
-        routing_policy_chunks = self.rag.search(message)
+
         previous_user = next(
             (item["content"] for item in reversed(self.history) if item["role"] == "user"),
             "",
@@ -138,6 +137,17 @@ dados pessoais além do necessário para responder ao próprio cliente.
             if previous_user
             else None
         )
+        policy_context_follow_up = (
+            previous_intent == "policy" and is_contextual_follow_up(message)
+        )
+        routing_query = (
+            f"{self.last_policy_query or previous_user} {message}".strip()
+            if policy_context_follow_up
+            else message
+        )
+        # RAG runs before the final route. Its evidence grounds policy replies;
+        # direct product/category facts remain deterministic catalog queries.
+        routing_policy_chunks = self.rag.search(routing_query)
         catalog_follow_up = is_catalog_follow_up(message)
         catalog_message = message
         catalog_history_available = (
@@ -205,12 +215,7 @@ dados pessoais além do necessário para responder ao próprio cliente.
                 has_policy_evidence=bool(routing_policy_chunks),
             )
         )
-        if (
-            intent == "unknown"
-            and previous_intent == "policy"
-            and is_contextual_follow_up(message)
-            and parse_budget(message) is None
-        ):
+        if intent == "unknown" and policy_context_follow_up and parse_budget(message) is None:
             intent = "policy"
 
         if intent == "greeting":
@@ -243,6 +248,8 @@ dados pessoais além do necessário para responder ao próprio cliente.
             answer, grounding = self._order_answer(message)
         elif intent == "policy":
             answer, grounding = self._policy_answer(message, routing_policy_chunks)
+            if not policy_context_follow_up:
+                self.last_policy_query = message
         else:
             answer, grounding = self._unknown(), []
 
@@ -817,7 +824,19 @@ dados pessoais além do necessário para responder ao próprio cliente.
     ) -> tuple[str, list[RetrievedChunk]]:
         chunks = self.rag.search(message) if chunks is None else chunks
         words = keyword_set(message)
-        if words & {"horario", "horarios", "expediente", "funcionamento", "aberto"}:
+        previous_policy_words = keyword_set(self.last_policy_query)
+        if is_policy_acknowledgement(message) and previous_policy_words & {
+            "devolucao", "devolver", "arrependimento", "reembolso",
+        }:
+            answer = (
+                "Para seguir com a devolução por arrependimento, envie para a equipe "
+                "o número do pedido ou os dados usados na compra. Mantenha o produto "
+                "na embalagem original, sem sinais de uso, com acessórios e manuais. "
+                "Após a solicitação ser formalizada, a equipe orienta o envio; o frete "
+                "de devolução é por conta da loja e o reembolso ocorre na mesma forma "
+                "de pagamento em até 10 dias úteis após a conferência."
+            )
+        elif words & {"horario", "horarios", "expediente", "funcionamento", "aberto"}:
             answer = "O atendimento funciona de segunda a sexta, das 9h às 18h; sábado, das 9h às 13h; domingo e feriados: fechado."
         elif words & {"endereco", "localizacao", "onde"}:
             answer = "A loja fica na Rua 14 de Maio, 3200, Centro, Campo Grande/MS, CEP 79202-333."
@@ -892,11 +911,20 @@ def is_brand_follow_up(message: str, store: CatalogStore) -> bool:
     )
 
 
+def is_policy_acknowledgement(message: str) -> bool:
+    normalized = normalize(message).strip("?!., ")
+    return bool(
+        re.match(r"^(?:sim|ok|okay|certo|entendi|pode|por favor)\b", normalized)
+        or re.search(r"\b(?:proximos? passos?|fazer agora|como continuar)\b", normalized)
+    )
+
+
 def is_contextual_follow_up(message: str) -> bool:
     normalized = normalize(message).strip("?!., ")
     return bool(
         re.match(r"^(?:e|mas|tambem)\b", normalized)
         or normalized in {"como funciona", "qual prazo", "e depois", "e nesse caso"}
+        or is_policy_acknowledgement(message)
     )
 
 def is_checkout_request(message: str) -> bool:
