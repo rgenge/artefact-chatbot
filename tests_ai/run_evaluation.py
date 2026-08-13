@@ -577,6 +577,50 @@ def build_conversations(store: CatalogStore, policy_text: str) -> tuple[list[Con
             ),
         ),
         Conversation(
+            name="yamaha C40 checkout through PIX",
+            turns=(
+                Turn(
+                    user="hum e violão normal da yamaha?",
+                    source="catalog",
+                    must_contain=(f"Encontrei {len(yamaha)} violões da Yamaha", *(product.name for product in yamaha)),
+                    note="A natural-language browse request lists the full Yamaha guitar set deterministically.",
+                ),
+                Turn(
+                    user="Quero o C40",
+                    source="catalog",
+                    must_contain=("Yamaha C40 Nylon Natural", format_brl(store.effective_price(yamaha_c40)), "12 unidade(s)"),
+                    must_not_contain=("Pode reformular",),
+                    note="A short model choice is resolved against the previous list.",
+                ),
+                Turn(
+                    user="Quero comprar o C40",
+                    source="checkout",
+                    must_contain=("Perfeito! Selecionei 1x Yamaha C40 Nylon Natural", "nome completo"),
+                    note="An explicit purchase request keeps the contextual model selected.",
+                ),
+                Turn(
+                    user="Atila, 679999999, tEste@teste.com.br, rua teste, 556",
+                    source="checkout",
+                    must_contain=("forma de pagamento", "1x Yamaha C40 Nylon Natural"),
+                    must_not_contain=("nome completo", "telefone ou e-mail"),
+                    note="One-word names, contact, email, and address are accumulated from one turn.",
+                ),
+                Turn(
+                    user="Atila da Silva, pagamento em 3 x",
+                    source="checkout",
+                    must_contain=("crédito em 3x", "pedido ainda não foi criado"),
+                    must_not_contain=("Aceitamos PIX", "Pode reformular"),
+                    note="Installment-only wording remains checkout and implies credit payment.",
+                ),
+                Turn(
+                    user="pode ser pix",
+                    source="checkout",
+                    must_contain=("pagamento em PIX", "pedido ainda não foi criado"),
+                    must_not_contain=("em 3x", "nome completo", "Pode reformular"),
+                    note="Choosing PIX replaces the prior installment state and reaches final confirmation.",
+                ),
+            ),
+        ),        Conversation(
             name="policy basics",
             turns=(
                 policy_turn(

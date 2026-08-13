@@ -25,8 +25,8 @@ bash ./run.sh
 Expected result:
 
 ~~~text
-Ran 52 tests ... OK
-The evaluator covers 56 source-backed turns; run it to refresh tests_ai/report.md.
+Ran 55 tests ... OK
+The evaluator covers 62 source-backed turns; run it to refresh tests_ai/report.md.
 ~~~
 
 The generated evaluation files are tests_ai/report.md and
@@ -171,7 +171,7 @@ The evaluation compares answers with committed CSV/PDF source data. It checks
 exact catalog rows, totals, promotions, policy evidence, history, privacy,
 checkout and handoff behavior instead of only checking that a response sounds
 plausible. The committed report is a previous run; the command above regenerates
-it with the current 56-turn fixture set.
+it with the current 62-turn fixture set.
 
 ## Scope and limitations
 
