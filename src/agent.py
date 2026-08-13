@@ -105,7 +105,9 @@ dados pessoais além do necessário para responder ao próprio cliente.
         self.exchange_active = False
         self.exchange_product_id: Optional[int] = None
         self.exchange_received_date: Optional[str] = None
-
+        self.warranty_active = False
+        self.warranty_product_id: Optional[int] = None
+        self.warranty_purchase_date: Optional[str] = None
     @property
     def customer(self) -> Optional[Customer]:
         return self.store.customers_by_id.get(self.customer_id) if self.customer_id else None
@@ -124,6 +126,9 @@ dados pessoais além do necessário para responder ao próprio cliente.
         if not message:
             return "Pode me contar como posso ajudar?"
         self._remember_customer(message)
+        # Retrieve policy evidence before routing. Exact catalog fields still use
+        # deterministic CSV queries, but policy context guides ambiguous turns.
+        routing_policy_chunks = self.rag.search(message)
         previous_user = next(
             (item["content"] for item in reversed(self.history) if item["role"] == "user"),
             "",
@@ -180,14 +185,25 @@ dados pessoais além do necessário para responder ao próprio cliente.
                 replace_budget=True,
             )
 
+        warranty_request = is_warranty_request(message)
+        warranty_continuation = (
+            self.warranty_active and is_warranty_continuation(message, self.store)
+        )
         exchange_continuation = self.exchange_active and is_exchange_continuation(message, self.store)
         checkout_continuation = self.checkout_active and is_checkout_continuation(message, self.store)
         intent = (
-            "exchange"
+            "warranty"
+            if warranty_request or warranty_continuation
+            else "exchange"
             if exchange_continuation
             else "checkout"
             if checkout_continuation
-            else route_message(catalog_message, self.store, allow_handoff=self.handoff_enabled)
+            else route_message(
+                catalog_message,
+                self.store,
+                allow_handoff=self.handoff_enabled,
+                has_policy_evidence=bool(routing_policy_chunks),
+            )
         )
         if (
             intent == "unknown"
@@ -212,6 +228,8 @@ dados pessoais além do necessário para responder ao próprio cliente.
             answer, grounding = self._checkout_answer(message)
         elif intent == "exchange":
             answer, grounding = self._exchange_answer(message)
+        elif intent == "warranty":
+            answer, grounding = self._warranty_answer(message, routing_policy_chunks)
         elif intent == "catalog":
             answer, grounding = self._catalog_answer(catalog_message)
             if (
@@ -224,7 +242,7 @@ dados pessoais além do necessário para responder ao próprio cliente.
         elif intent == "order":
             answer, grounding = self._order_answer(message)
         elif intent == "policy":
-            answer, grounding = self._policy_answer(message)
+            answer, grounding = self._policy_answer(message, routing_policy_chunks)
         else:
             answer, grounding = self._unknown(), []
 
@@ -411,6 +429,69 @@ dados pessoais além do necessário para responder ao próprio cliente.
             f"Encontrei {item}; temos {product.stock_quantity} unidade(s) disponíveis. "
             "Você quer esse modelo? Se sim, confirme a quantidade e envie nome completo, "
             "telefone ou e-mail e endereço de entrega.",
+            grounding,
+        )
+    def _warranty_answer(
+        self,
+        message: str,
+        policy_chunks: list[RetrievedChunk],
+    ) -> tuple[str, list[RetrievedChunk]]:
+        """Continue a manufacturing-defect case without losing policy context."""
+
+        self.warranty_active = True
+        if not policy_chunks:
+            policy_chunks = self.rag.search(
+                "defeito de fabricação troca 30 dias garantia legal 90 dias "
+                "mau uso quedas umidade modificações não autorizadas"
+            )
+
+        named = self.store.best_product_match(message)
+        product = named
+        if named is not None:
+            self.warranty_product_id = named.product_id
+        elif self.warranty_product_id is not None:
+            product = self.store.products_by_id.get(self.warranty_product_id)
+
+        purchase_date = extract_exchange_date(message)
+        if purchase_date:
+            self.warranty_purchase_date = purchase_date
+
+        grounding = (
+            self.store.grounding_for_products([product]) if product is not None else []
+        )
+        grounding.extend(policy_chunks)
+
+        if product is None:
+            return (
+                "Sinto muito pelo problema. Para avaliar uma possível troca por defeito "
+                "de fabricação, informe o modelo, a data de compra ou recebimento e "
+                "descreva o defeito. A política prevê atendimento inicial em até 30 "
+                "dias corridos e garantia legal de 90 dias; após os 30 dias iniciais, "
+                "o cliente pode acionar a garantia diretamente com o fabricante, e a loja pode intermediar. "
+                "Mau uso, quedas, umidade extrema e modificações não autorizadas não "
+                "são cobertos.",
+                grounding,
+            )
+
+        if self.warranty_purchase_date:
+            return (
+                f"Você informou o {product.name}, adquirido em "
+                f"{self.warranty_purchase_date}. Para defeito de fabricação, a "
+                "política prevê solicitação de análise/troca em até 30 dias corridos. "
+                "Também existe a garantia legal de 90 dias; após os 30 dias iniciais, "
+                "o cliente pode acionar a garantia diretamente com o fabricante, e a loja pode intermediar. "
+                "Confirme o ano da compra, envie o comprovante e descreva o defeito. "
+                "Mau uso, quedas, umidade extrema e modificações não autorizadas não "
+                "são cobertos.",
+                grounding,
+            )
+
+        return (
+            f"Recebi o modelo {product.name}. Para avaliar a garantia por defeito de "
+            "fabricação, informe a data de compra ou recebimento, o ano, o comprovante "
+            "e uma descrição do defeito. A política prevê atendimento inicial em até "
+            "30 dias corridos e garantia legal de 90 dias; mau uso, quedas, umidade "
+            "extrema e modificações não autorizadas não são cobertos.",
             grounding,
         )
     def _exchange_answer(self, message: str) -> tuple[str, list[RetrievedChunk]]:
@@ -729,8 +810,12 @@ dados pessoais além do necessário para responder ao próprio cliente.
             )
         ]
 
-    def _policy_answer(self, message: str) -> tuple[str, list[RetrievedChunk]]:
-        chunks = self.rag.search(message)
+    def _policy_answer(
+        self,
+        message: str,
+        chunks: Optional[list[RetrievedChunk]] = None,
+    ) -> tuple[str, list[RetrievedChunk]]:
+        chunks = self.rag.search(message) if chunks is None else chunks
         words = keyword_set(message)
         if words & {"horario", "horarios", "expediente", "funcionamento", "aberto"}:
             answer = "O atendimento funciona de segunda a sexta, das 9h às 18h; sábado, das 9h às 13h; domingo e feriados: fechado."
@@ -923,6 +1008,37 @@ def extract_exchange_date(message: str) -> Optional[str]:
     return f"{day:02d}/{month:02d}"
 
 
+def is_warranty_request(message: str) -> bool:
+    """Detect a request about a product defect without treating stock as support."""
+
+    normalized = normalize(message)
+    words = keyword_set(message)
+    if words & {"defeito", "garantia"}:
+        return True
+    return bool(
+        words & {"problema", "problemas"}
+        and re.search(
+            r"\b(?:produto|instrumento|violao|guitarra|baixo|troca|trocar|trocam)\b",
+            normalized,
+        )
+    )
+
+
+def is_warranty_continuation(message: str, store: CatalogStore) -> bool:
+    """Keep model/date answers attached to an open defect-warranty case."""
+
+    normalized = normalize(message)
+    if extract_exchange_date(message):
+        return True
+    product = store.best_product_match(message)
+    return bool(
+        product is not None
+        and not re.search(
+            r"\b(?:quais|qual|preco|custa|valor|estoque|disponivel|tem|opcoes)\b",
+            normalized,
+        )
+    )
+
 def is_exchange_continuation(message: str, store: CatalogStore) -> bool:
     normalized = normalize(message)
     if extract_exchange_date(message):
@@ -957,7 +1073,13 @@ def is_injection(message: str) -> bool:
     )
 
 
-def route_message(message: str, store: CatalogStore, *, allow_handoff: bool = True) -> str:
+def route_message(
+    message: str,
+    store: CatalogStore,
+    *,
+    allow_handoff: bool = True,
+    has_policy_evidence: bool = False,
+) -> str:
     if not normalize(message):
         return "unknown"
     if is_greeting(message):
@@ -1012,9 +1134,6 @@ def route_message(message: str, store: CatalogStore, *, allow_handoff: bool = Tr
     # diverted to the delivery-policy route just because it contains "entrega".
     if availability_signal and (category_id is not None or product is not None or brand_matches):
         return "catalog"
-    if policy_signal:
-        return "policy"
-
     catalog_signal = bool(
         words & {
             "preco", "custa", "valor", "estoque", "disponivel", "disponibilidade",
@@ -1022,8 +1141,15 @@ def route_message(message: str, store: CatalogStore, *, allow_handoff: bool = Tr
             "descontos", "oferta", "ofertas", "especial", "especiais", "exclusivo", "exclusiva", "black", "friday", "tem",
         }
     )
+    # Explicit policy requests keep their policy context even if the sentence
+    # also mentions an instrument (for example, "trocar um violão").
+    if policy_signal:
+        return "policy"
+    # Structured catalog evidence wins for product/category/brand questions.
     if category_id is not None or product is not None or brand_matches or catalog_signal:
         return "catalog"
+    # A retrieved chunk alone is not enough to turn an unrelated question into
+    # store policy. It remains available as grounding once a policy route wins.
     if order_signal:
         return "order"
     return "unknown"

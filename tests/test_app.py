@@ -203,6 +203,24 @@ class StoreAgentTests(unittest.TestCase):
         self.assertIsNone(agent.store._customers_cache)
         self.assertIsNone(agent.store._orders_cache)
         self.assertIsNone(agent.store._order_items_cache)
+    def test_warranty_follow_up_keeps_defect_policy_context(self):
+        agent = StoreAgent(DATA, use_llm=False)
+        policy_queries = []
+        agent.rag.search = lambda query: policy_queries.append(query) or []
+
+        first = agent.handle("To com produto com problema, trocam ?")
+        self.assertIn("defeito de fabricação", first)
+        self.assertIn("30 dias corridos", first)
+        self.assertTrue(agent.warranty_active)
+
+        answer = agent.handle("Yamaha Bass 3X Electric Bass, adquirido em 12/08")
+        self.assertIn("Yamaha Bass 3X Electric Bass", answer)
+        self.assertIn("adquirido em 12/08", answer)
+        self.assertIn("30 dias corridos", answer)
+        self.assertIn("garantia legal de 90 dias", answer)
+        self.assertIn("Confirme o ano", answer)
+        self.assertNotIn("Temos 11 unidade(s)", answer)
+        self.assertTrue(any("defeito" in query.lower() for query in policy_queries))
     def test_checkout_flow_preserves_product_and_address(self):
         agent = StoreAgent(DATA, use_llm=False)
         policy_queries = []
