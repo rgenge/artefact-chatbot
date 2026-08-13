@@ -25,8 +25,8 @@ bash ./run.sh
 Expected result:
 
 ~~~text
-Ran 34 tests ... OK
-Evaluated 42 turns: 42 passed, 0 failed, 0 warnings.
+Ran 52 tests ... OK
+The evaluator covers 56 source-backed turns; run it to refresh tests_ai/report.md.
 ~~~
 
 The generated evaluation files are tests_ai/report.md and
@@ -152,7 +152,7 @@ for contextual follow-ups, while structured state tracks:
 
 - the active catalog query and pagination;
 - exchange product/date;
-- checkout product, quantity and delivery address.
+- checkout product, quantity, customer/contact data, payment installments and delivery address.
 
 Customer and order tables are loaded only for an authenticated order lookup.
 Checkout does not create an order. Human-handoff triggers such as a late,
@@ -170,12 +170,29 @@ The test suite checks isolated behavior and realistic conversation flow:
 The evaluation compares answers with committed CSV/PDF source data. It checks
 exact catalog rows, totals, promotions, policy evidence, history, privacy,
 checkout and handoff behavior instead of only checking that a response sounds
-plausible.
+plausible. The committed report is a previous run; the command above regenerates
+it with the current 56-turn fixture set.
 
 ## Scope and limitations
 
-This is a local prototype. The CSV snapshot is the database, customer id stands
-in for authentication, embeddings are rebuilt at process start, and checkout
-collects information without creating an order or contacting a payment service.
-A production version would persist the index, add real authentication,
-observability and a support queue.
+This is a local prototype, **read-only by design**: it never writes to
+`orders.csv`, `order_items.csv` or `customers.csv`. Every run starts from the
+same committed snapshot, customer id stands in for authentication, embeddings
+are rebuilt at process start, checkout collects and validates the full purchase
+case but does not persist it, and a handoff records a ticket without dispatching
+it. A production version would also persist the index, add real authentication
+and observability.
+
+**Turning this into a fully autonomous system — one that actually creates
+orders and customer records as it talks to people — is the highest-priority
+next step, not something this submission attempts.** The plan: four typed MCP
+tools (`customers_find`, `customers_create`, `stock_check`, `orders_create`)
+that own every write, called only after explicit customer confirmation. The
+write is one transaction — find/create the customer, check stock, append to
+`orders.csv` and `order_items.csv`, decrement stock — atomic (temp file plus
+replace), single-writer (the web UI is threaded), and idempotent via a key
+derived from the conversation, so a retry returns the existing order instead of
+creating a second one. Totals, delivery estimate and tracking code still come
+only from the data and the policy manual, never from the model. This was
+deliberately left unbuilt: a rushed write path into shared CSVs the night
+before a deadline is a worse risk than an honest "not yet."
