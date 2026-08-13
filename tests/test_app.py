@@ -61,6 +61,22 @@ class StoreAgentTests(unittest.TestCase):
         follow_up = agent.handle("Quero saber todos")
         self.assertIn("Yamaha CG162S Nylon Natural", follow_up)
 
+    def test_live_catalog_list_cannot_be_summarized(self):
+        agent = StoreAgent(DATA, use_llm=True)
+        agent.client.api_key = "local-test-key"
+        agent._gemini_answer = lambda message, grounding: "Yamaha C40 e Yamaha F310."
+        answer = agent.handle("Quais violões Yamaha estão disponíveis?")
+        self.assertIn("Encontrei 7 violões", answer)
+        self.assertIn("Yamaha CG162S Nylon Natural", answer)
+        self.assertIn("Yamaha NTX1 Elétrico Nylon Natural", answer)
+
+    def test_natural_catalog_follow_up_lists_previous_results(self):
+        agent = StoreAgent(DATA, use_llm=False)
+        agent.handle("Quais violões Yamaha estão disponíveis?")
+        answer = agent.handle("Só tem esses?")
+        self.assertIn("Encontrei 7 violões", answer)
+        self.assertIn("Yamaha CG162S Nylon Natural", answer)
+
     def test_accessory_scope_is_explicit(self):
         agent = StoreAgent(DATA, use_llm=False)
         answer = agent.handle("Vocês vendem cabos e palhetas?")
