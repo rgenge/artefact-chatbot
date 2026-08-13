@@ -426,6 +426,49 @@ def build_conversations(store: CatalogStore, policy_text: str) -> tuple[list[Con
                 ),
             ),
         ),        Conversation(
+            name="history-aware typo and policy follow-ups",
+            turns=(
+                Turn(
+                    user="oie",
+                    source="policy",
+                    must_contain=("Empório da Música",),
+                ),
+                Turn(
+                    user="quero violã oaté 900 reais",
+                    source="catalog",
+                    must_contain=("Encontrei 11 violões disponíveis até R$ 900,00",),
+                    note="A misspelled category and joined budget connector still use deterministic catalog retrieval.",
+                ),
+                Turn(
+                    user="e violão até 300 reais",
+                    source="catalog",
+                    must_contain=("Não encontrei violões disponíveis até R$ 300,00",),
+                ),
+                Turn(
+                    user="e até 600 reais ?",
+                    source="catalog",
+                    must_contain=(
+                        "Encontrei 5 violões disponíveis até R$ 600,00",
+                        "Yamaha C40 Nylon Natural",
+                    ),
+                    must_not_contain=("Pode reformular", "Yamaha F310 Aço Natural"),
+                    note="The category is inherited from the previous catalog conversation and the new budget replaces the old one.",
+                ),
+                Turn(
+                    user="qual sua politica de deveolução ?",
+                    source="policy",
+                    must_contain=("7 dias corridos", "10 dias úteis", "embalagem original"),
+                    note="A policy typo is resolved through the business-query synonym layer and local PDF retrieval.",
+                ),
+                Turn(
+                    user="e pra pagar parcelado ?",
+                    source="policy",
+                    must_contain=("12x sem juros", "parcela mínima de R$ 100,00"),
+                    must_not_contain=("Pode reformular",),
+                    note="The payment follow-up is routed to policy using the current turn plus chat context.",
+                ),
+            ),
+        ),        Conversation(
             name="policy basics",
             turns=(
                 policy_turn(
