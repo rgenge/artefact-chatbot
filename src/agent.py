@@ -28,12 +28,18 @@ ACCESSORY_TERMS = {
 }
 
 
+DAMAGE_PATTERNS = (
+    r"\b(?:comprei|recebi|veio|chegou|est[aá])\b.{0,100}\b(?:quebrad[oa]|danificad[oa]|avariad[oa]|rachad[oa]|trincad[oa]|amassad[oa]|solt[oa]|quebrou)\b",
+    r"\b(?:perna|parte|peca|suporte|pedal|casco|pele)\b.{0,30}\b(?:quebrad[oa]|danificad[oa]|solt[oa]|rachad[oa]|trincad[oa])\b",
+)
+
 HANDOFF_PATTERNS = (
     r"\batras(?:ad[oa]s?|o|os|ou|ando)\b",
     r"\bnao (?:chegou|chegaram|recebi|veio|vieram|entregaram|foi entregue)\b",
     r"\b(?:falar|conversar|atendimento) com (?:um |uma )?(?:atendente|humano|humana|pessoa|gerente|vendedor|alguem)\b",
     r"\b(?:quero|queria|preciso de|passa para) (?:um |uma )?(?:atendente|humano|humana|gerente)\b",
     r"\b(?:veio|chegou|recebi) (?:o |a )?(?:produto |item |pedido )?(?:quebrad[oa]|danificad[oa]|errad[oa]|amassad[oa])\b",
+    *DAMAGE_PATTERNS,
     r"\bprocon\b",
 )
 
@@ -43,6 +49,25 @@ CHECKOUT_PATTERNS = (
     r"\b(?:finalizar|concluir|fechar|prosseguir)\b.*\b(?:compra|pedido)\b",
     r"\b(?:quero|gostaria de|posso)\s+(?:comprar|adquirir|levar)\b",
 )
+
+# "What do you sell?" asks for the shape of the catalog, not 61 product rows.
+# The honest answer is the category list, which is also short enough to read.
+CATEGORY_OVERVIEW_PATTERNS = (
+    r"\b(?:que|quais|qual)\s+(?:os\s+|as\s+)?tipos?\b",
+    r"\btipos?\s+de\s+(?:produto|produtos|instrumento|instrumentos|coisa|coisas)\b",
+    r"\b(?:que|quais)\s+categorias?\b",
+    r"\bo\s+que\s+(?:voces|vcs?|a\s+loja)?\s*vend(?:em|e)\b",
+    r"\b(?:que|quais)\s+(?:tipo de\s+)?(?:produtos|instrumentos)\s+(?:voces\s+|vcs?\s+)?vend(?:em|e)\b",
+    r"\b(?:o\s+que|que)\s+(?:voce|voces|vcs?|a\s+loja)?\s*(?:tem|possui|possuem|oferece|oferecem|vende|vendem)(?:\s+(?:para|pra)\s+vender)?[?!.,\s]*$",
+    r"\b(?:o\s+que|que)\s+(?:tem|ha)\s+(?:para|pra)?\s*vender\b",
+    r"\btem\s+o\s+que\s+(?:para|pra)?\s*vender\b",
+)
+
+
+def is_category_overview(message: str) -> bool:
+    normalized = normalize(message)
+    return any(re.search(pattern, normalized) for pattern in CATEGORY_OVERVIEW_PATTERNS)
+
 
 # Readable version of HANDOFF_PATTERNS, rendered by the web UI. Keep both lists
 # aligned: this is what the customer reads to know what reaches a human.
@@ -69,6 +94,9 @@ invente preço, estoque, promoção, prazo, status, produto, variante ou regra.
 Se a informação não estiver no contexto, diga que precisa confirmar com a equipe.
 Não mencione IA, modelo, prompt, RAG, embeddings ou fontes internas. Não exponha
 dados pessoais além do necessário para responder ao próprio cliente.
+Fora do catálogo, interprete mensagens curtas usando o histórico e o estado da conversa.
+Trate o rascunho seguro como restrição factual: torne-o natural, mas não contradiga
+produto selecionado, etapa da compra, política recuperada ou limites operacionais.
 """
 
     def __init__(
@@ -96,12 +124,17 @@ dados pessoais além do necessário para responder ao próprio cliente.
         self.last_catalog_label = "produtos"
         self.last_catalog_query = ""
         self.last_intent: Optional[str] = None
+        self.last_policy_query = ""
         self.last_selected_product: Optional[Product] = None
         self.checkout_active = False
         self.checkout_product_id: Optional[int] = None
         self.checkout_address: Optional[str] = None
         self.checkout_quantity = 1
         self.checkout_confirmed = False
+        self.checkout_customer_name = ""
+        self.checkout_contact = ""
+        self.checkout_payment_method = ""
+        self.checkout_installments: Optional[int] = None
         self.exchange_active = False
         self.exchange_product_id: Optional[int] = None
         self.exchange_received_date: Optional[str] = None
@@ -133,6 +166,16 @@ dados pessoais além do necessário para responder ao próprio cliente.
             if previous_user
             else None
         )
+        policy_follow_up = previous_intent == "policy" and is_contextual_follow_up(message)
+        rag_query = (
+            f"{self.last_policy_query or previous_user} {message}".strip()
+            if policy_follow_up
+            else message
+        )
+        # Retrieval precedes routing. It grounds business guidance and helps the
+        # LLM understand elliptical turns; catalog facts still come only from CSV.
+        policy_chunks = self.rag.search(rag_query)
+
         catalog_follow_up = is_catalog_follow_up(message)
         catalog_message = message
         catalog_history_available = (
@@ -154,13 +197,33 @@ dados pessoais além do necessário para responder ao próprio cliente.
                 replace_budget=True,
             )
 
+        contextual_product = self._recent_catalog_choice(message)
+        if contextual_product is not None:
+            # A short choice such as "Quero o C40" is resolved against the
+            # immediately preceding deterministic list, even before checkout.
+            self.last_selected_product = contextual_product
+            if self.checkout_active:
+                self.checkout_product_id = contextual_product.product_id
+                self.checkout_confirmed = True
+            elif is_checkout_request(message):
+                self.checkout_product_id = contextual_product.product_id
+                self.checkout_confirmed = True
+
         exchange_continuation = self.exchange_active and is_exchange_continuation(message, self.store)
-        checkout_continuation = self.checkout_active and is_checkout_continuation(message, self.store)
+        checkout_continuation = self.checkout_active and (
+            contextual_product is not None
+            or is_checkout_continuation(message, self.store)
+        )
+        contextual_catalog_choice = contextual_product is not None and not is_checkout_request(message)
+        if contextual_catalog_choice:
+            catalog_message = contextual_product.name
         intent = (
             "exchange"
             if exchange_continuation
             else "checkout"
             if checkout_continuation
+            else "catalog"
+            if contextual_catalog_choice
             else route_message(catalog_message, self.store, allow_handoff=self.handoff_enabled)
         )
         if (
@@ -189,21 +252,26 @@ dados pessoais além do necessário para responder ao próprio cliente.
         elif intent == "catalog":
             answer, grounding = self._catalog_answer(catalog_message)
             brand_switch_follow_up = bool(re.fullmatch(r"e(?: da| do| das| dos| a| o)? [a-z0-9-]+", normalize(message).strip("?!., ")))
-            if not catalog_follow_up or budget_context_follow_up or brand_switch_follow_up:
+            brand_query_follow_up = bool(self.store.brand_products(message))
+            if not catalog_follow_up or budget_context_follow_up or brand_switch_follow_up or brand_query_follow_up:
                 self.last_catalog_query = catalog_message
         elif intent == "order":
             answer, grounding = self._order_answer(message)
         elif intent == "policy":
-            answer, grounding = self._policy_answer(message)
+            answer, grounding = self._policy_answer(message, policy_chunks)
+            if not policy_follow_up:
+                self.last_policy_query = message
         else:
-            answer, grounding = self._unknown(), []
+            answer, grounding = self._unknown(), policy_chunks
 
-        # Only rewrite when there is retrieved evidence to rewrite from. With no
-        # grounding the answer is a deterministic refusal ("identify yourself",
-        # "no rule found"), and a free rewrite drops the guarantee it carries.
-        if (self.use_llm and self.client.enabled and grounding and intent in {"catalog", "order", "policy", "unknown"} and not self._is_structured_catalog_list(intent, grounding)):
-            generated = self._gemini_answer(catalog_message if intent == "catalog" else message, grounding)
-            if generated and self._response_is_grounded(generated, grounding):
+        # The LLM handles language and continuity for non-catalog business flows.
+        # Catalog rows, prices and stock are never rewritten by generation.
+        llm_eligible = intent in {"policy", "checkout", "exchange", "unknown"} or (
+            intent == "order" and bool(grounding)
+        )
+        if self.use_llm and self.client.enabled and llm_eligible:
+            generated = self._gemini_answer(message, grounding, answer, intent)
+            if generated and self._response_is_grounded(generated, grounding) and self._response_preserves_draft(generated, answer, self.store):
                 answer = generated
 
         self.last_intent = intent
@@ -211,7 +279,33 @@ dados pessoais além do necessário para responder ao próprio cliente.
         self.history.append({"role": "assistant", "content": answer})
         return answer
 
-    def _gemini_answer(self, message: str, grounding: list[RetrievedChunk]) -> Optional[str]:
+    def _recent_catalog_choice(self, message: str) -> Optional[Product]:
+        """Resolve a short choice only against products shown in the last list."""
+
+        if not self.last_catalog_products:
+            return None
+        normalized = normalize(message)
+        if re.search(r"\b(?:quais|qual|tem|preco|custa|estoque|disponivel)\b", normalized):
+            return None
+        query_words = keyword_set(message) - {
+            "ah", "a", "o", "as", "os", "da", "do", "das", "dos", "pode",
+            "ser", "esse", "essa", "quero", "queria", "prefiro", "escolho",
+        }
+        if not query_words:
+            return None
+        matches = [
+            product for product in self.last_catalog_products
+            if query_words & keyword_set(product.name)
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def _gemini_answer(
+        self,
+        message: str,
+        grounding: list[RetrievedChunk],
+        draft_answer: str = "",
+        intent: str = "unknown",
+    ) -> Optional[str]:
         source_block = (
             "\n\n---\n\n".join(
                 f"SOURCE {index}: {chunk.title} ({chunk.source_type})\n{chunk.content}"
@@ -223,6 +317,22 @@ dados pessoais além do necessário para responder ao próprio cliente.
         history_block = "\n".join(
             f"{item['role']}: {item['content']}" for item in self.history[-10:]
         ) or "No recent conversation history."
+        selected = (
+            self.store.products_by_id.get(self.checkout_product_id)
+            if self.checkout_product_id is not None
+            else self.last_selected_product
+        )
+        state_block = (
+            f"Intent atual: {intent}\n"
+            f"Compra em andamento: {'sim' if self.checkout_active else 'não'}\n"
+            f"Produto selecionado: {selected.name if selected else 'nenhum'}\n"
+            f"Dados da compra: nome={self.checkout_customer_name or 'pendente'}; "
+            f"contato={self.checkout_contact or 'pendente'}; "
+            f"endereço={self.checkout_address or 'pendente'}; "
+            f"pagamento={self.checkout_payment_method or 'pendente'}; "
+            f"parcelas={self.checkout_installments or 'não informado'}\n"
+            f"Rascunho seguro do fluxo: {draft_answer or 'nenhum'}"
+        )
         list_all_instruction = (
             "Quando o cliente pedir todos, quais modelos ou a lista completa, enumere "
             "todos os itens correspondentes presentes no contexto confiável; não reduza a resposta "
@@ -235,6 +345,8 @@ dados pessoais além do necessário para responder ao próprio cliente.
             f"{list_all_instruction}\n\n"
             "Trusted context:\n"
             f"{source_block}\n\n"
+            "Conversation state:\n"
+            f"{state_block}\n\n"
             "Recent conversation:\n"
             f"{history_block}"
         )
@@ -255,6 +367,67 @@ dados pessoais além do necessário para responder ao próprio cliente.
         for value in mentioned:
             number = re.sub(r"[^0-9]", "", value)
             if number and number not in trusted_digits:
+                return False
+        return True
+
+    @staticmethod
+    def _response_preserves_draft(
+        answer: str,
+        draft: str,
+        store: CatalogStore,
+    ) -> bool:
+        """Reject a fluent rewrite when it drops important workflow facts."""
+
+        if not draft:
+            return True
+        normalized_answer = normalize(answer)
+        normalized_draft = normalize(draft)
+        required_phrases = (
+            "qual modelo",
+            "nome completo",
+            "telefone ou email",
+            "7 dias corridos",
+            "10 dias uteis",
+            "30 dias corridos",
+            "90 dias",
+            "nao e cumulativo",
+            "nao sao cumulativos",
+            "nao sao compartilhados",
+            "outras cidades",
+            "cep",
+            "peso",
+            "dimensoes",
+            "9h as 18h",
+            "9h as 13h",
+            "fechado",
+            "24 horas uteis",
+            "troca por preferencia",
+            "embalagem original",
+            "recebimento",
+            "fabricante",
+            "pedido ainda nao foi criado",
+            "produto ainda nao foi criado",
+            "rua 14 de maio",
+        )
+        for phrase in required_phrases:
+            if phrase in normalized_draft and phrase not in normalized_answer:
+                return False
+
+        for amount in re.findall(r"r\$\s*[\d.,]+", normalized_draft):
+            if amount not in normalized_answer:
+                return False
+        for stock in re.findall(r"\b\d+\s+unidade", normalized_draft):
+            if stock not in normalized_answer:
+                return False
+        for quantity in re.findall(r"\b\d{1,2}x\b", normalized_draft):
+            if quantity not in normalized_answer:
+                return False
+        for workflow_phrase in ("em nome de", "contato", "endereco", "pagamento em"):
+            if workflow_phrase in normalized_draft and workflow_phrase not in normalized_answer:
+                return False
+        for product in store.products:
+            name = normalize(product.name)
+            if len(name) >= 12 and name in normalized_draft and name not in normalized_answer:
                 return False
         return True
 
@@ -331,6 +504,23 @@ dados pessoais além do necessário para responder ao próprio cliente.
         quantity = extract_quantity(message)
         if quantity is not None:
             self.checkout_quantity = quantity
+        name = extract_checkout_name(message)
+        if name:
+            self.checkout_customer_name = name
+        contact = extract_checkout_contact(message)
+        if contact:
+            self.checkout_contact = contact
+        payment_method, installments = extract_checkout_payment(message)
+        if payment_method:
+            self.checkout_payment_method = payment_method
+            if payment_method in {"PIX", "débito", "boleto"}:
+                # These methods are à vista; a later PIX choice replaces any
+                # previously collected credit-card installment count.
+                self.checkout_installments = None
+        if installments is not None:
+            self.checkout_installments = installments
+        if is_checkout_selection_confirmation(message) or named is not None:
+            self.checkout_confirmed = True
 
         grounding = (
             self.store.grounding_for_products([product]) if product is not None else []
@@ -353,34 +543,50 @@ dados pessoais além do necessário para responder ao próprio cliente.
 
         price = format_brl(self.store.effective_price(product))
         item = f"{self.checkout_quantity}x {product.name} ({price})"
-        if address:
+        shortage = (
+            f"Temos {product.stock_quantity} unidade(s) em estoque, então posso seguir "
+            f"com {product.stock_quantity} ou buscar outro modelo."
+            if self.checkout_quantity > product.stock_quantity
+            else f"Temos {product.stock_quantity} unidade(s) disponíveis."
+        )
+        if not self.checkout_confirmed:
             return (
-                f"Recebi o endereço de entrega: {self.checkout_address}. "
-                f"Para encaminhar a compra de {item}, faltam seu nome completo, telefone ou e-mail "
-                "e a forma de pagamento (PIX, débito, cartão ou boleto). O pedido ainda não foi criado; "
+                f"Encontrei {item}; {shortage} Você quer esse modelo? Se sim, confirme a quantidade "
+                "e envie nome completo, telefone ou e-mail e endereço de entrega.",
+                grounding,
+            )
+
+        received_address = (
+            f"Recebi o endereço de entrega: {self.checkout_address}. "
+            if address
+            else ""
+        )
+        missing: list[str] = []
+        if not self.checkout_customer_name:
+            missing.append("nome completo")
+        if not self.checkout_contact:
+            missing.append("telefone ou e-mail")
+        if not self.checkout_address:
+            missing.append("endereço de entrega")
+        if not self.checkout_payment_method:
+            missing.append("forma de pagamento")
+        if missing:
+            fields = ", ".join(missing[:-1]) + (
+                f" e {missing[-1]}" if len(missing) > 1 else missing[0]
+            )
+            return (
+                f"Perfeito! Selecionei {item}. {shortage} {received_address}"
+                f"Para concluir, ainda preciso de {fields}. O pedido ainda não foi criado; "
                 "ele só será registrado após essa confirmação.",
                 grounding,
             )
-        # Chosen explicitly (named or confirmed) versus merely inferred from the
-        # previous turn, which still has to be checked with the customer.
-        if named is not None or is_checkout_confirmation(message) or self.checkout_confirmed:
-            self.checkout_confirmed = True
-            shortage = (
-                f" Temos {product.stock_quantity} unidade(s) em estoque, então posso seguir "
-                f"com {product.stock_quantity} ou buscar outro modelo."
-                if self.checkout_quantity > product.stock_quantity
-                else f" Temos {product.stock_quantity} unidade(s) disponíveis."
-            )
-            return (
-                f"Perfeito! Selecionei {item}.{shortage} "
-                "Para concluir, envie seu nome completo, telefone ou e-mail "
-                "e o endereço de entrega. Depois confirmamos a forma de pagamento e registramos o pedido.",
-                grounding,
-            )
+        payment = self.checkout_payment_method
+        if self.checkout_installments:
+            payment += f" em {self.checkout_installments}x"
         return (
-            f"Encontrei {item}; temos {product.stock_quantity} unidade(s) disponíveis. "
-            "Você quer esse modelo? Se sim, confirme a quantidade e envie nome completo, "
-            "telefone ou e-mail e endereço de entrega.",
+            f"Recebi os dados para {item}, em nome de {self.checkout_customer_name}, "
+            f"contato {self.checkout_contact}, endereço {self.checkout_address} e pagamento em {payment}. "
+            "O pedido ainda não foi criado; confirme se os dados estão corretos para registrarmos a compra.",
             grounding,
         )
     def _exchange_answer(self, message: str) -> tuple[str, list[RetrievedChunk]]:
@@ -464,10 +670,17 @@ dados pessoais além do necessário para responder ao próprio cliente.
         self.pending_handoffs.append(ticket)
         # TODO: dispatch the ticket to the human queue and return the real protocol.
 
-        answer = (
-            f"Sinto muito pelo transtorno. Já estou acionando um atendente da equipe "
-            f"para assumir o seu caso (protocolo {ticket['protocol']})."
-        )
+        if is_damage_report(message):
+            answer = (
+                "Sinto muito: entendi que o instrumento está com avaria. "
+                f"Já estou acionando um atendente da equipe para assumir o seu caso "
+                f"(protocolo {ticket['protocol']})."
+            )
+        else:
+            answer = (
+                f"Sinto muito pelo transtorno. Já estou acionando um atendente da equipe "
+                f"para assumir o seu caso (protocolo {ticket['protocol']})."
+            )
         if order is not None:
             answer += f" Vou encaminhar junto os dados do pedido {order.order_id}."
         elif self.customer_id is None:
@@ -475,8 +688,34 @@ dados pessoais além do necessário para responder ao próprio cliente.
                 " Para agilizar, me informe o número do pedido e o nome ou e-mail "
                 "usado na compra."
             )
+        if is_damage_report(message):
+            answer += " Preserve a embalagem e, se possível, envie fotos do dano à equipe."
         answer += " O retorno acontece em até 24 horas úteis, no horário de atendimento."
         return answer, []
+
+    def _category_overview(self) -> tuple[str, list[RetrievedChunk]]:
+        counts: dict[int, int] = {}
+        for item in self.store.products:
+            if item.available:
+                counts[item.category_id] = counts.get(item.category_id, 0) + 1
+        rows = sorted(
+            ((self.store.category_name(cid), total) for cid, total in counts.items()),
+            key=lambda pair: (-pair[1], pair[0]),
+        )
+        if not rows:
+            return "Não encontrei produtos disponíveis no catálogo agora.", []
+        lines = ["Trabalhamos com estas famílias de instrumentos:"]
+        lines += [f"- {name}: {total} modelo(s) disponíveis." for name, total in rows]
+        lines.append("Me diga a família que te interessa e eu listo os modelos.")
+        return "\n".join(lines), [
+            RetrievedChunk(
+                title="Categorias do catálogo",
+                source_type="catalog_row",
+                content="\n".join(f"{name}: {total} disponíveis" for name, total in rows),
+                score=12.0,
+                retrieval="structured",
+            )
+        ]
 
     def _catalog_answer(self, message: str) -> tuple[str, list[RetrievedChunk]]:
         category_id = self.store.category_id_for(message)
@@ -485,9 +724,34 @@ dados pessoais além do necessário para responder ao próprio cliente.
         words = keyword_set(message)
         query_norm = normalize(message)
 
+        # Asked what the store sells, with no family named: answer with families.
+        if (
+            is_category_overview(message)
+            and category_id is None
+            and product is None
+            and max_price is None
+        ):
+            self.last_selected_product = None
+            return self._category_overview()
+
         brand_products = self.store.brand_products(
             message, category_id=category_id, max_price=max_price
         )
+        brand_scope = self.store.brand_products(message, category_id=category_id)
+        if (
+            not brand_products
+            and brand_scope
+            and product is None
+            and not query_model_numbers(message)
+            and category_id is not None
+            and max_price is not None
+        ):
+            brand = normalize(brand_scope[0].name).split()[0].title()
+            label = self.store.category_name(category_id).lower()
+            return (
+                f"Não encontrei {label} da {brand} disponíveis até {format_brl(max_price)}.",
+                [],
+            )
         # Brand/category questions list every matching model, not just best_product_match().
         if brand_products and product is None and not query_model_numbers(message):
             self.last_selected_product = None
@@ -679,8 +943,10 @@ dados pessoais além do necessário para responder ao próprio cliente.
             )
         ]
 
-    def _policy_answer(self, message: str) -> tuple[str, list[RetrievedChunk]]:
-        chunks = self.rag.search(message)
+    def _policy_answer(
+        self, message: str, chunks: Optional[list[RetrievedChunk]] = None
+    ) -> tuple[str, list[RetrievedChunk]]:
+        chunks = self.rag.search(message) if chunks is None else chunks
         words = keyword_set(message)
         if words & {"horario", "horarios", "expediente", "funcionamento", "aberto"}:
             answer = "O atendimento funciona de segunda a sexta, das 9h às 18h; sábado, das 9h às 13h; domingo e feriados: fechado."
@@ -702,7 +968,7 @@ dados pessoais além do necessário para responder ao próprio cliente.
             answer = "Em compras online, você pode pedir devolução em até 7 dias corridos após o recebimento, sem justificativa. O produto deve estar na embalagem original, sem sinais de uso e com todos os acessórios e manuais. O reembolso ocorre na forma de pagamento original em até 10 dias úteis; o frete de devolução é por conta da loja em caso de arrependimento."
         elif words & {"troca", "trocar", "preferencia", "modelo", "cor"}:
             answer = "Trocas por preferência são permitidas em até 7 dias, conforme disponibilidade, com o produto em perfeito estado e na embalagem original."
-        elif words & {"defeito", "garantia"}:
+        elif is_damage_report(message) or words & {"defeito", "garantia"}:
             answer = "Defeitos de fabricação podem ser tratados em até 30 dias corridos para troca. Após esse prazo, o cliente deve acionar a garantia diretamente com o fabricante; a loja pode intermediar. A garantia legal é de 90 dias, e a garantia do fabricante pode variar de 6 meses a 2 anos. Mau uso, quedas, umidade extrema e modificações não autorizadas não são cobertos."
         elif words & {"frete", "entrega", "entregas"}:
             answer = "Na região metropolitana de Campo Grande, o frete é grátis acima de R$ 500 e custa R$ 35 abaixo disso, com prazo de 1 a 3 dias úteis; a entrega é feita por motoboy próprio; o cliente é contactado por telefone antes do despacho. Para outras cidades, o cálculo depende de CEP, peso e dimensões: PAC leva 5 a 12 dias úteis, SEDEX 2 a 5 e Jadlog 3 a 8, todos com seguro contra extravios."
@@ -792,6 +1058,103 @@ def extract_delivery_address(message: str) -> Optional[str]:
     return " ".join(address.strip(" ,.;").split()) or None
 
 
+def _valid_checkout_name(candidate: str) -> Optional[str]:
+    candidate = re.split(
+        r"\b(?:telefone|celular|fone|e-?mail|pagamento|pagar|pix|credito|cartao|boleto|debito|endereco)\b",
+        candidate,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    candidate = " ".join(candidate.strip(" ,:;-.").split())
+    if not candidate or re.search(r"\d|@", candidate):
+        return None
+    words = re.findall(r"[A-Za-zÀ-ÿ]+", candidate)
+    if not 1 <= len(words) <= 5:
+        return None
+    normalized = normalize(candidate)
+    if set(normalized.split()) & {
+        "sim", "isso", "confirmo", "quero", "comprar", "adquirir", "levar",
+        "ah", "pode", "ser", "esse", "essa", "mesmo", "prefiro", "escolho", "modelo",
+        "qual", "politica", "preco", "estoque", "disponivel", "instrumento",
+    }:
+        return None
+    return candidate
+
+
+def extract_checkout_name(message: str) -> Optional[str]:
+    """Extract a customer name without treating a product query as one."""
+
+    address_match = re.search(
+        r"\b(?:rua|avenida|av|alameda|travessa|estrada|rodovia|pra[cç]a)\b",
+        message,
+        re.IGNORECASE,
+    )
+    before_address = message[:address_match.start()] if address_match else message
+    explicit = re.search(
+        r"\b(?:meu\s+)?nome(?:\s+completo)?\s*[:\-]?\s*([^,;]+)",
+        before_address,
+        re.IGNORECASE,
+    )
+    if explicit:
+        name = _valid_checkout_name(explicit.group(1))
+        if name:
+            return name
+
+    # Comma-separated checkout data may contain a one-word name, e.g.
+    # "Atila, 679999999, email@site.com, Rua ...".
+    if "," in before_address:
+        for part in before_address.split(","):
+            candidate = re.sub(
+                r"^\s*(?:sim|isso|confirmo|pode ser)\s*[:\-]?\s*",
+                "",
+                part,
+                flags=re.IGNORECASE,
+            ).strip()
+            name = _valid_checkout_name(candidate)
+            if name:
+                return name
+
+    # A later standalone correction such as "Atila da Silva" should remain in
+    # checkout while ordinary questions are rejected by the validation above.
+    if not re.search(r"[?!]", message) and "," not in message:
+        return _valid_checkout_name(message)
+    return None
+
+
+def extract_checkout_contact(message: str) -> Optional[str]:
+    email = re.search(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", message)
+    if email:
+        return email.group(0)
+    phone = re.search(r"\+?\d(?:[\d ()-]{7,})\d", message)
+    return phone.group(0).strip() if phone else None
+
+
+def extract_checkout_payment(message: str) -> tuple[Optional[str], Optional[int]]:
+    normalized = normalize(message).replace("´", "")
+    labels = (
+        (r"cre\s*dito", "crédito"),
+        (r"cartao", "cartão"),
+        (r"debito", "débito"),
+        (r"pix", "PIX"),
+        (r"boleto", "boleto"),
+    )
+    method = next(
+        (label for token, label in labels if re.search(rf"\b{token}\b", normalized)),
+        None,
+    )
+    installments = None
+    match = re.search(r"\b(\d{1,2})\s*x\b", normalized)
+    if match and (
+        method
+        or re.search(r"\b(?:pagamento|parcel|parcelado|vezes)\b", normalized)
+    ):
+        installments = int(match.group(1))
+        # In this store, an installment count means credit-card payment unless
+        # the customer later chooses an à-vista method such as PIX.
+        method = method or "crédito"
+    return method, installments
+
+
 # Spelled-out counts customers actually use; digits cover the rest.
 QUANTITY_WORDS = {
     "um": 1, "uma": 1, "dois": 2, "duas": 2, "tres": 3, "quatro": 4,
@@ -800,13 +1163,20 @@ QUANTITY_WORDS = {
 
 
 def extract_quantity(message: str) -> Optional[int]:
-    """Read a checkout quantity, only with an explicit unit or a buying verb.
+    """Read units while keeping credit-card installments out of the quantity."""
 
-    Kept strict on purpose: a bare number in "até 1000" is a budget, not a count.
-    """
     normalized = normalize(message)
-    match = re.search(
-        r"\b(\d{1,3})\s*(?:unidade|unidades|peca|pecas|item|itens|x)\b", normalized
+    payment_installment = bool(
+        re.search(r"\b(?:credito|cartao|parcel|pagarei|pagamento|vezes)\b", normalized)
+        and re.search(r"\b\d{1,2}\s*x\b", normalized)
+    )
+    unit_pattern = (
+        r"\b(\d{1,3})\s*(?:unidade|unidades|peca|pecas|item|itens)\b"
+        if payment_installment
+        else r"\b(\d{1,3})\s*(?:unidade|unidades|peca|pecas|item|itens|x)\b"
+    )
+    match = re.search(unit_pattern, normalized) or re.search(
+        r"\b(\d{1,2})\s*(?:apenas|so|somente)\b", normalized
     ) or re.search(
         r"\b(?:quero|queria|vou levar|leva|manda|coloca|seriam|sao|quantidade)\s+(\d{1,3})\b",
         normalized,
@@ -819,12 +1189,46 @@ def extract_quantity(message: str) -> Optional[int]:
     return QUANTITY_WORDS[match.group(1)] if match else None
 
 
+def is_checkout_selection_confirmation(message: str) -> bool:
+    """Identify a confirmation/data turn without confusing it with a new query."""
+
+    normalized = normalize(message).strip("?!., ")
+    if is_checkout_confirmation(message):
+        return True
+    if not re.match(r"^(?:sim|isso|confirmo|pode ser)\b", normalized):
+        return bool(
+            extract_quantity(message)
+            or extract_delivery_address(message)
+            or extract_checkout_name(message)
+            or extract_checkout_contact(message)
+            or extract_checkout_payment(message)[0]
+        )
+    method, _ = extract_checkout_payment(message)
+    return bool(
+        extract_quantity(message)
+        or extract_delivery_address(message)
+        or extract_checkout_name(message)
+        or extract_checkout_contact(message)
+        or method
+    )
+
+
 def is_checkout_continuation(message: str, store: CatalogStore) -> bool:
     normalized = normalize(message)
     if extract_delivery_address(message) or is_checkout_confirmation(message):
         return True
-    # The agent asks for a quantity, so the answer to it must stay in checkout.
-    if extract_quantity(message) is not None:
+    if re.search(
+        r"\b(?:como faco|como prossigo|como continuo|o que faco agora|proximos? passos?|"
+        r"pode ser|vou ficar com|quero esse|quero essa|escolho|prefiro)\b",
+        normalized,
+    ):
+        return True
+    # Quantity, customer-name and payment-only replies must stay in checkout.
+    if (
+        extract_quantity(message) is not None
+        or extract_checkout_name(message) is not None
+        or extract_checkout_payment(message)[0] is not None
+    ):
         return True
     if re.search(r"@|\+?\d[\d ()-]{7,}", message):
         return True
@@ -835,6 +1239,25 @@ def is_checkout_continuation(message: str, store: CatalogStore) -> bool:
     ):
         return True
     return False
+
+def is_damage_report(message: str) -> bool:
+    """Detect a purchased instrument reported as broken or otherwise damaged."""
+
+    normalized = normalize(message)
+    damage = re.search(
+        r"\b(?:quebrad[oa]|danificad[oa]|avariad[oa]|rachad[oa]|trincad[oa]|"
+        r"amassad[oa]|solt[oa]|quebrou)\b",
+        normalized,
+    )
+    if not damage:
+        return False
+    context = keyword_set(message) & {
+        "produto", "instrumento", "bateria", "violao", "guitarra", "baixo",
+        "teclado", "piano", "ukulele", "comprei", "recebi", "compra", "pedido",
+    }
+    part = re.search(r"\b(?:perna|parte|peca|suporte|pedal|casco|pele)\b", normalized)
+    return bool(context or part)
+
 
 def is_exchange_request(message: str) -> bool:
     normalized = normalize(message)
@@ -883,7 +1306,9 @@ def is_exchange_continuation(message: str, store: CatalogStore) -> bool:
 
 def needs_human_handoff(message: str) -> bool:
     normalized = normalize(message)
-    return any(re.search(pattern, normalized) for pattern in HANDOFF_PATTERNS)
+    return is_damage_report(message) or any(
+        re.search(pattern, normalized) for pattern in HANDOFF_PATTERNS
+    )
 
 
 def is_injection(message: str) -> bool:
@@ -924,8 +1349,14 @@ def route_message(message: str, store: CatalogStore, *, allow_handoff: bool = Tr
     order_signal = bool(
         words & {"pedido", "pedidos", "ordem", "compra", "rastrear", "rastreamento", "tracking", "status", "despachado"}
     )
+    location_signal = bool(
+        re.search(r"\b(?:onde|qual)\b.{0,25}\b(?:fica|endereco|localizacao)\b", normalize(message))
+        or re.search(r"\b(?:onde fica|endereco da|localizacao da)\s+(?:a\s+)?loja\b", normalize(message))
+    )
     policy_signal = bool(
-        is_exchange_request(message)
+        location_signal
+        or is_damage_report(message)
+        or is_exchange_request(message)
         or words & {
             "devolucao", "devolver", "arrependimento", "troca", "trocar", "defeito",
             "garantia", "pagamento", "pix", "boleto", "cartao", "horario",
@@ -939,11 +1370,21 @@ def route_message(message: str, store: CatalogStore, *, allow_handoff: bool = Tr
         or extract_order_reference(message) is not None
     ):
         return "order"
+    inventory_catalog_signal = bool(
+        (store.category_id_for(message) is not None or store.best_product_match(message) is not None)
+        and re.search(
+            r"\b(?:pronta[- ]entrega|em estoque|disponibilidade|disponivel|disponíveis)\b",
+            normalize(message),
+        )
+    )
+    if inventory_catalog_signal:
+        return "catalog"
     if policy_signal:
         return "policy"
 
     catalog_signal = bool(
-        words & {
+        is_category_overview(message)
+        or words & {
             "preco", "custa", "valor", "estoque", "disponivel", "disponibilidade",
             "opcoes", "produto", "catalogo", "promocao", "promocoes", "desconto",
             "descontos", "oferta", "ofertas", "especial", "especiais", "exclusivo", "exclusiva", "black", "friday", "tem",
@@ -960,9 +1401,13 @@ def route_message(message: str, store: CatalogStore, *, allow_handoff: bool = Tr
 __all__ = [
     "ACCESSORY_TERMS",
     "CHECKOUT_PATTERNS",
+    "DAMAGE_PATTERNS",
     "HANDOFF_PATTERNS",
     "HANDOFF_TRIGGER_LABELS",
     "StoreAgent",
+    "extract_checkout_contact",
+    "extract_checkout_name",
+    "extract_checkout_payment",
     "extract_delivery_address",
     "extract_exchange_date",
     "extract_order_reference",
@@ -973,6 +1418,7 @@ __all__ = [
     "is_checkout_request",
     "is_contextual_follow_up",
     "is_exchange_continuation",
+    "is_damage_report",
     "is_exchange_request",
     "is_greeting",
     "is_injection",

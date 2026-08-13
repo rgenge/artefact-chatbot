@@ -154,6 +154,7 @@ def build_conversations(store: CatalogStore, policy_text: str) -> tuple[list[Con
     yamaha_category = store.category_id_for("violões")
     yamaha = store.brand_products("Yamaha violões", category_id=yamaha_category)
     yamaha_c40 = product_named(store, "Yamaha C40 Nylon Natural")
+    tagima_memphis = product_named(store, "Tagima Memphis AC-39")
     all_violoes = store.search_products("violões", category_id=yamaha_category, limit=100)
     budget_violoes = store.search_products("violões", category_id=yamaha_category, max_price=1000, limit=100)
     tagima_violoes = store.brand_products("Tagima violões", category_id=yamaha_category)
@@ -252,7 +253,8 @@ def build_conversations(store: CatalogStore, policy_text: str) -> tuple[list[Con
                     note="The conversation state confirms that the complete filtered set was already shown.",
                 ),
             ),
-        ),        Conversation(
+        ),
+        Conversation(
             name="brand listing and contextual follow-up",
             turns=(
                 Turn(
@@ -426,7 +428,8 @@ def build_conversations(store: CatalogStore, policy_text: str) -> tuple[list[Con
                     note="The follow-up combines deterministic product facts with retrieved exchange guidance.",
                 ),
             ),
-        ),        Conversation(
+        ),
+        Conversation(
             name="history-aware typo and policy follow-ups",
             turns=(
                 Turn(
@@ -467,6 +470,154 @@ def build_conversations(store: CatalogStore, policy_text: str) -> tuple[list[Con
                     must_contain=("12x sem juros", "parcela mínima de R$ 100,00"),
                     must_not_contain=("Pode reformular",),
                     note="The payment follow-up is routed to policy using the current turn plus chat context.",
+                ),
+            ),
+        ),
+        Conversation(
+            name="damaged instrument never becomes catalog search",
+            turns=(
+                Turn(
+                    user="Oie to com problema",
+                    source="policy",
+                    must_contain=("registrar", "24 horas úteis"),
+                    note="A generic complaint opens service context before the customer explains the incident.",
+                ),
+                Turn(
+                    user="comprei uma bateria ai e está com perna quebrada",
+                    source="policy",
+                    must_contain=("avaria", "atendente", "protocolo"),
+                    must_not_contain=("Encontrei 3 baterias", "R$ 4.439,00"),
+                    note="A broken component is a damage report and must be handed off or handled by warranty, never listed as catalog.",
+                ),
+            ),
+        ),
+        Conversation(
+            name="catalog overview and brand budget context",
+            turns=(
+                Turn(
+                    user="Qual o prazo de entrega?",
+                    source="policy",
+                    must_contain=("Campo Grande", "1 a 3 dias úteis"),
+                    note="A policy turn establishes the previous context without changing the next catalog intent.",
+                ),
+                Turn(
+                    user="E tem o que pra vender ai?",
+                    source="catalog",
+                    must_contain=("famílias de instrumentos", "Violões: 33 modelo(s)", "Guitarras: 5 modelo(s)"),
+                    must_not_contain=("orientação no manual", "Pode reformular"),
+                    note="A direct catalog overview must not fall back to a retrieved policy chunk.",
+                ),
+                Turn(
+                    user="O que você tem pra vender?",
+                    source="catalog",
+                    must_contain=("famílias de instrumentos", "Violões: 33 modelo(s)"),
+                    must_not_contain=("Pode reformular",),
+                    note="Singular informal wording still reaches the deterministic catalog overview.",
+                ),
+                Turn(
+                    user="violão",
+                    source="catalog",
+                    must_contain=("Encontrei 33 violões disponíveis",),
+                ),
+                Turn(
+                    user="yamaha quais mais?",
+                    source="catalog",
+                    must_contain=(f"Encontrei {len(yamaha)} violões da Yamaha", *(product.name for product in yamaha)),
+                    note="The brand follow-up inherits the previous instrument family.",
+                ),
+                Turn(
+                    user="E menos de 500 reais?",
+                    source="catalog",
+                    must_contain=("Não encontrei violões da Yamaha disponíveis até R$ 500,00",),
+                    must_not_contain=("Tagima Memphis", "Rozini RC-104"),
+                    note="A later price filter must retain Yamaha instead of broadening to every violão.",
+                ),
+            ),
+        ),
+        Conversation(
+            name="checkout data accumulation and card installments",
+            turns=(
+                Turn(
+                    user="Quais violões até 500 reais?",
+                    source="catalog",
+                    must_contain=("Encontrei 2 violões disponíveis até R$ 500,00",),
+                ),
+                Turn(
+                    user="Quero um Tagima Memphis então",
+                    source="catalog",
+                    must_contain=(tagima_memphis.name, format_brl(store.effective_price(tagima_memphis))),
+                ),
+                Turn(
+                    user="Quero comprar ele",
+                    source="checkout",
+                    must_contain=("Você quer esse modelo?", tagima_memphis.name),
+                    note="The selected product is confirmed before collecting personal data.",
+                ),
+                Turn(
+                    user="Sim, 1 apenas, atila carlos, 67 99999999, rua teste, 55 7",
+                    source="checkout",
+                    must_contain=("1x Tagima Memphis AC-39 Nylon Natural", "forma de pagamento"),
+                    must_not_contain=("nome completo", "telefone ou e-mail", "2x Tagima"),
+                    note="Name, contact, address, and quantity are accumulated from one data turn.",
+                ),
+                Turn(
+                    user="nome: atila carlos, telefone 67 99961-5555, pagarei em crédito 2 x",
+                    source="checkout",
+                    must_contain=("1x Tagima Memphis AC-39 Nylon Natural", "crédito em 2x", "pedido ainda não foi criado"),
+                    must_not_contain=("2x Tagima Memphis AC-39 Nylon Natural",),
+                    note="Card installments must never overwrite the item quantity.",
+                ),
+                Turn(
+                    user="1 apenas, atila carlos, 67 99999-5588, endereço: rua teste, 553.",
+                    source="checkout",
+                    must_contain=("1x Tagima Memphis AC-39 Nylon Natural", "crédito em 2x"),
+                    must_not_contain=("2x Tagima Memphis AC-39 Nylon Natural",),
+                    note="A later correction keeps the payment and quantity from prior turns.",
+                ),
+            ),
+        ),
+        Conversation(
+            name="yamaha C40 checkout through PIX",
+            turns=(
+                Turn(
+                    user="hum e violão normal da yamaha?",
+                    source="catalog",
+                    must_contain=(f"Encontrei {len(yamaha)} violões da Yamaha", *(product.name for product in yamaha)),
+                    note="A natural-language browse request lists the full Yamaha guitar set deterministically.",
+                ),
+                Turn(
+                    user="Quero o C40",
+                    source="catalog",
+                    must_contain=("Yamaha C40 Nylon Natural", format_brl(store.effective_price(yamaha_c40)), "12 unidade(s)"),
+                    must_not_contain=("Pode reformular",),
+                    note="A short model choice is resolved against the previous list.",
+                ),
+                Turn(
+                    user="Quero comprar o C40",
+                    source="checkout",
+                    must_contain=("Perfeito! Selecionei 1x Yamaha C40 Nylon Natural", "nome completo"),
+                    note="An explicit purchase request keeps the contextual model selected.",
+                ),
+                Turn(
+                    user="Atila, 679999999, tEste@teste.com.br, rua teste, 556",
+                    source="checkout",
+                    must_contain=("forma de pagamento", "1x Yamaha C40 Nylon Natural"),
+                    must_not_contain=("nome completo", "telefone ou e-mail"),
+                    note="One-word names, contact, email, and address are accumulated from one turn.",
+                ),
+                Turn(
+                    user="Atila da Silva, pagamento em 3 x",
+                    source="checkout",
+                    must_contain=("crédito em 3x", "pedido ainda não foi criado"),
+                    must_not_contain=("Aceitamos PIX", "Pode reformular"),
+                    note="Installment-only wording remains checkout and implies credit payment.",
+                ),
+                Turn(
+                    user="pode ser pix",
+                    source="checkout",
+                    must_contain=("pagamento em PIX", "pedido ainda não foi criado"),
+                    must_not_contain=("em 3x", "nome completo", "Pode reformular"),
+                    note="Choosing PIX replaces the prior installment state and reaches final confirmation.",
                 ),
             ),
         ),        Conversation(
