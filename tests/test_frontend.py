@@ -53,9 +53,9 @@ class FrontendChatTests(unittest.TestCase):
                 cls.process.kill()
                 cls.process.wait(timeout=5)
 
-    def ask(self, message):
+    def ask(self, message, customer_id=None):
         payload = json.dumps(
-            {"message": message, "customer_id": None, "handoff": False},
+            {"message": message, "customer_id": customer_id, "conversation_id": "frontend-history-test", "handoff": False},
             ensure_ascii=False,
         ).encode("utf-8")
         request = Request(
@@ -83,7 +83,7 @@ class FrontendChatTests(unittest.TestCase):
         low = self.ask("e violão até 300 reais")
         self.assertIn("Não encontrei violões disponíveis até R$ 300,00", low)
 
-        middle = self.ask("e até 600 reais ?")
+        middle = self.ask("e até 600 reais ?", customer_id=2)
         self.assertIn("Encontrei 5 violões disponíveis até R$ 600,00", middle)
         self.assertIn("Yamaha C40 Nylon Natural", middle)
         self.assertNotIn("Pode reformular", middle)
