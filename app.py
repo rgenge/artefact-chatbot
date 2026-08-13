@@ -1497,7 +1497,10 @@ dados pessoais além do necessário para responder ao próprio cliente.
 
         if category_id is not None:
             self.last_selected_product = None
-            products = all_products[:5]
+            # Small filtered sets are complete answers; broad category searches
+            # remain paginated to keep the chat readable.
+            show_all_filtered = max_price is not None and len(all_products) <= 15
+            products = all_products if show_all_filtered else all_products[:5]
             self.last_catalog_products = all_products
             self.last_catalog_offset = len(products)
             self.last_catalog_label = label
@@ -1619,6 +1622,7 @@ def is_catalog_follow_up(message: str) -> bool:
     normalized = normalize(message).strip("?!., ")
     return bool(
         re.search(r"\b(?:todos|todas|cada|lista completa|mais modelos?|so tem esses|so esses|tem mais|tem outros|sao todos|sao esses|apenas esses|somente esses|restante|restantes|o que falta|faltam|outros|outras)\b", normalized)
+        or re.search(r"\b(?:quais|qual|que|mostre|mostrar|ver|lista(?:r)?)\s+(?:mais|outros|outras|restantes)\b", normalized)
         or re.fullmatch(r"e(?: da| do| das| dos| a| o)? [a-z0-9-]+", normalized)
     )
 

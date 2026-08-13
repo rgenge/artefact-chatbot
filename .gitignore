@@ -17,8 +17,8 @@ __pycache__/
 .coverage
 htmlcov/
 
-# Dados e artefatos do desafio (não versionados)
-data/
+# O enunciado do desafio não é entregável; os dados em data/ SÃO, porque sem
+# eles o projeto clonado não roda.
 desafio_tecnico_ai_eng_artefact.pdf
 
 # Saídas geradas pela avaliação automatizada (tests_ai/run_evaluation.py)
