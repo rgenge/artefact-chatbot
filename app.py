@@ -1012,6 +1012,7 @@ dados pessoais além do necessário para responder ao próprio cliente.
         self.checkout_product_id: Optional[int] = None
         self.checkout_address: Optional[str] = None
         self.checkout_quantity = 1
+        self.checkout_confirmed = False
 
     @property
     def customer(self) -> Optional[Customer]:
@@ -1169,18 +1170,25 @@ dados pessoais além do necessário para responder ao próprio cliente.
         policy_chunks = self.rag.search(
             "finalizar compra formas de pagamento entrega endereço"
         )
-        product = self.store.best_product_match(message)
-        if product is not None and product.available:
-            self.checkout_product_id = product.product_id
-        elif self.checkout_product_id is not None:
-            product = self.store.products_by_id.get(self.checkout_product_id)
-        elif self.last_selected_product is not None:
-            product = self.last_selected_product
-            self.checkout_product_id = product.product_id
+        # Naming a product now counts as choosing it; otherwise fall back to what
+        # was already chosen, then to the single product the customer just viewed.
+        named = self.store.best_product_match(message)
+        product = named
+        if named is not None and named.available:
+            self.checkout_product_id = named.product_id
+        elif named is None:
+            if self.checkout_product_id is not None:
+                product = self.store.products_by_id.get(self.checkout_product_id)
+            elif self.last_selected_product is not None:
+                product = self.last_selected_product
+                self.checkout_product_id = product.product_id
 
         address = extract_delivery_address(message)
         if address:
             self.checkout_address = address
+        quantity = extract_quantity(message)
+        if quantity is not None:
+            self.checkout_quantity = quantity
 
         grounding = (
             self.store.grounding_for_products([product]) if product is not None else []
@@ -1211,10 +1219,19 @@ dados pessoais além do necessário para responder ao próprio cliente.
                 "ele só será registrado após essa confirmação.",
                 grounding,
             )
-        if is_checkout_confirmation(message) or product.product_id == self.checkout_product_id:
+        # Chosen explicitly (named or confirmed) versus merely inferred from the
+        # previous turn, which still has to be checked with the customer.
+        if named is not None or is_checkout_confirmation(message) or self.checkout_confirmed:
+            self.checkout_confirmed = True
+            shortage = (
+                f" Temos {product.stock_quantity} unidade(s) em estoque, então posso seguir "
+                f"com {product.stock_quantity} ou buscar outro modelo."
+                if self.checkout_quantity > product.stock_quantity
+                else f" Temos {product.stock_quantity} unidade(s) disponíveis."
+            )
             return (
-                f"Perfeito! Selecionei {item}; temos {product.stock_quantity} unidade(s) disponíveis. "
-                "Para concluir, confirme a quantidade e envie seu nome completo, telefone ou e-mail "
+                f"Perfeito! Selecionei {item}.{shortage} "
+                "Para concluir, envie seu nome completo, telefone ou e-mail "
                 "e o endereço de entrega. Depois confirmamos a forma de pagamento e registramos o pedido.",
                 grounding,
             )
@@ -1520,21 +1537,61 @@ def is_checkout_confirmation(message: str) -> bool:
 
 
 def extract_delivery_address(message: str) -> Optional[str]:
-    """Recognize a street address without interpreting it as a product query."""
+    """Recognize a street address without interpreting it as a product query.
+
+    Returns only the address span: the customer usually wraps it in politeness
+    or a payment note, and echoing the whole sentence back reads as a mistake.
+    """
+    match = re.search(
+        r"\b(?:rua|avenida|av|alameda|travessa|estrada|rodovia|pra[cç]a)\b.*",
+        message,
+        re.IGNORECASE,
+    )
+    if not match or not re.search(r"\d{1,6}", match.group(0)):
+        return None
+    address = re.split(
+        r",?\s+(?:e\s+(?:quero|queria|vou|posso|pago)|por favor|obrigad[oa]|"
+        r"pode\s+(?:enviar|entregar|mandar)|pagamento|pago)\b",
+        match.group(0),
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    return " ".join(address.strip(" ,.;").split()) or None
+
+
+# Spelled-out counts customers actually use; digits cover the rest.
+QUANTITY_WORDS = {
+    "um": 1, "uma": 1, "dois": 2, "duas": 2, "tres": 3, "quatro": 4,
+    "cinco": 5, "seis": 6, "sete": 7, "oito": 8, "nove": 9, "dez": 10,
+}
+
+
+def extract_quantity(message: str) -> Optional[int]:
+    """Read a checkout quantity, only with an explicit unit or a buying verb.
+
+    Kept strict on purpose: a bare number in "até 1000" is a budget, not a count.
+    """
     normalized = normalize(message)
-    if not re.search(
-        r"\b(?:rua|avenida|av|alameda|travessa|estrada|rodovia|praca)\b",
+    match = re.search(
+        r"\b(\d{1,3})\s*(?:unidade|unidades|peca|pecas|item|itens|x)\b", normalized
+    ) or re.search(
+        r"\b(?:quero|queria|vou levar|leva|manda|coloca|seriam|sao|quantidade)\s+(\d{1,3})\b",
         normalized,
-    ):
-        return None
-    if not re.search(r"\b\d{1,6}\b", normalized):
-        return None
-    return " ".join(message.strip(" ,").split())
+    )
+    if match:
+        value = int(match.group(1))
+        return value if 1 <= value <= 99 else None
+    words = "|".join(QUANTITY_WORDS)
+    match = re.search(rf"\b({words})\s+(?:unidade|unidades|peca|pecas|item|itens)\b", normalized)
+    return QUANTITY_WORDS[match.group(1)] if match else None
 
 
 def is_checkout_continuation(message: str, store: CatalogStore) -> bool:
     normalized = normalize(message)
     if extract_delivery_address(message) or is_checkout_confirmation(message):
+        return True
+    # The agent asks for a quantity, so the answer to it must stay in checkout.
+    if extract_quantity(message) is not None:
         return True
     if re.search(r"@|\+?\d[\d ()-]{7,}", message):
         return True

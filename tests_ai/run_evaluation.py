@@ -29,6 +29,7 @@ from app import (  # noqa: E402
     StoreAgent,
     format_brl,
     normalize,
+    parse_number,
 )
 
 
@@ -347,7 +348,7 @@ def build_conversations(store: CatalogStore, policy_text: str) -> tuple[list[Con
             turns=(
                 Turn(
                     user="Quais violões estão disponíveis até R$ 2.000?",
-                    source="checkout",
+                    source="catalog",
                     must_contain=("Encontrei 22 violões", "Mostrando 5 opções"),
                     note="The initial browse remains an exact structured catalog preview.",
                 ),
@@ -467,10 +468,14 @@ def source_blob_for(source: str, store: CatalogStore, policy_text: str) -> str:
     return catalog_text(store)
 
 
-def monetary_grounding_warnings(answer: str, source: str, store: CatalogStore, policy_text: str) -> list[str]:
+def monetary_grounding_warnings(answer: str, source: str, store: CatalogStore, policy_text: str, user_query: str = "") -> list[str]:
     trusted = normalize(source_blob_for(source, store, policy_text))
+    query_amounts = {parse_number(amount) for amount in MONEY_RE.findall(user_query)}
     warnings: list[str] = []
     for amount in MONEY_RE.findall(answer):
+        # A budget supplied by the customer is not a generated catalog fact.
+        if parse_number(amount) in query_amounts:
+            continue
         if normalize(amount) not in trusted:
             warnings.append(f"Unsupported monetary value in answer: {amount}")
     return warnings
@@ -520,7 +525,7 @@ def run_evaluation(
                 if not normalized_contains(result.answer, expected)
             )
             result.warnings.extend(
-                monetary_grounding_warnings(result.answer, turn.source, store, policy_text)
+                monetary_grounding_warnings(result.answer, turn.source, store, policy_text, turn.user)
             )
             result.passed = not result.failures
             results.append(result)

@@ -102,14 +102,19 @@ guard rejects answers that introduce monetary values absent from that context.
 turns. The prompt constrains scope, tone, language and length, and forbids
 inventing data. Accessory requests are redirected per the manual.
 
+**Checkout.** Buying is a separate flow from an order lookup: it keeps the
+chosen product, quantity and delivery address across turns, and loads no
+customer or order tables. It deliberately does not create an order — the agent
+says so explicitly rather than implying a purchase was registered.
+
 **Human handoff.** A narrow set of deterministic triggers — late delivery,
 non-delivery, damage on arrival, an explicit request for a person, a mention of
 Procon — routes the message to a handoff instead of an answer. The web UI shows
 the trigger list and lets the customer switch escalation off.
 
 The web UI (`python app.py --web`) uses exactly the same `StoreAgent`: every
-question is routed to catalog, order, policy or handoff without duplicating
-logic.
+question is routed to catalog, order, policy, checkout or handoff without
+duplicating logic.
 
 See [examples/conversations.md](examples/conversations.md) for the required
 scenarios.
@@ -144,7 +149,8 @@ immediately.
 The database is a local snapshot and there is no real customer authentication.
 The embedding index is rebuilt at process start instead of persisting to
 pgvector/Supabase as in TwinTweaker. The human handoff already detects and
-records the case, but dispatch to the support queue does not exist yet.
+records the case, but dispatch to the support queue does not exist yet, and
+checkout collects the purchase data without creating an order.
 
 With more time I would persist chunks and embeddings, add incremental updates,
 observability, and continuous recall/grounding evaluation.
