@@ -91,6 +91,14 @@ QUERY_SYNONYMS: dict[str, set[str]] = {
     "corda": {"cordas"},
     "palheta": {"palhetas"},
     "acessorio": {"acessorios"},
+    "oferta": {"promocao", "desconto"},
+    "ofertas": {"promocoes", "descontos"},
+    "especial": {"promocao", "desconto"},
+    "especiais": {"promocoes", "descontos"},
+    "exclusivo": {"promocao", "desconto"},
+    "exclusiva": {"promocao", "desconto"},
+    "black": {"promocao", "promocoes"},
+    "friday": {"promocao", "promocoes"},
 }
 
 ACCESSORY_TERMS = {
@@ -581,23 +589,60 @@ class CatalogStore:
         self.data_dir = Path(data_dir)
         self.products = self._load_products()
         self.promotions = self._load_promotions()
-        self.customers = self._load_customers()
-        self.orders = self._load_orders()
-        self.order_items = self._load_order_items()
         self.categories = self._load_categories()
         self.products_by_id = {item.product_id: item for item in self.products}
-        self.customers_by_id = {item.customer_id: item for item in self.customers}
-        self.orders_by_id = {item.order_id: item for item in self.orders}
+        # These tables are loaded only when a customer/order flow needs them.
+        self._customers_cache = None
+        self._orders_cache = None
+        self._order_items_cache = None
+        self._customers_by_id_cache = None
+        self._orders_by_id_cache = None
+        self._orders_by_customer_cache = None
         self.promotions_by_product: dict[int, list[Promotion]] = defaultdict(list)
         for promotion in self.promotions:
             self.promotions_by_product[promotion.product_id].append(promotion)
-        self.orders_by_customer: dict[int, list[Order]] = defaultdict(list)
-        for order in self.orders:
-            self.orders_by_customer[order.customer_id].append(order)
-        for orders in self.orders_by_customer.values():
-            orders.sort(key=lambda item: item.order_date, reverse=True)
         self.categories.setdefault(9, "Ukuleles")
 
+    @property
+    def customers(self) -> list[Customer]:
+        if self._customers_cache is None:
+            self._customers_cache = self._load_customers()
+        return self._customers_cache
+
+    @property
+    def orders(self) -> list[Order]:
+        if self._orders_cache is None:
+            self._orders_cache = self._load_orders()
+        return self._orders_cache
+
+    @property
+    def order_items(self) -> dict[int, list[dict[str, int]]]:
+        if self._order_items_cache is None:
+            self._order_items_cache = self._load_order_items()
+        return self._order_items_cache
+
+    @property
+    def customers_by_id(self) -> dict[int, Customer]:
+        if self._customers_by_id_cache is None:
+            self._customers_by_id_cache = {item.customer_id: item for item in self.customers}
+        return self._customers_by_id_cache
+
+    @property
+    def orders_by_id(self) -> dict[int, Order]:
+        if self._orders_by_id_cache is None:
+            self._orders_by_id_cache = {item.order_id: item for item in self.orders}
+        return self._orders_by_id_cache
+
+    @property
+    def orders_by_customer(self) -> dict[int, list[Order]]:
+        if self._orders_by_customer_cache is None:
+            result = defaultdict(list)
+            for order in self.orders:
+                result[order.customer_id].append(order)
+            for customer_orders in result.values():
+                customer_orders.sort(key=lambda item: item.order_date, reverse=True)
+            self._orders_by_customer_cache = result
+        return self._orders_by_customer_cache
     def _load_products(self) -> list[Product]:
         return [
             Product(
@@ -886,10 +931,14 @@ dados pessoais além do necessário para responder ao próprio cliente.
         return self.store.customers_by_id.get(self.customer_id) if self.customer_id else None
 
     def _remember_customer(self, message: str) -> None:
+        # Identity lookup is opt-in; catalog/promotion questions do not load customers.
+        if self.customer_id is not None:
+            return
+        if not re.search(r"@|\+?\d[\d ()-]{7,}|\b(?:sou|meu nome|meu email)\b", message, re.IGNORECASE):
+            return
         customer = self.store.identify_customer(message)
         if customer:
             self.customer_id = customer.customer_id
-
     def handle(self, message: str) -> str:
         message = message.strip()
         if not message:
@@ -988,17 +1037,35 @@ dados pessoais além do necessário para responder ao próprio cliente.
         words = keyword_set(message)
         query_norm = normalize(message)
 
-        if words & {"promocao", "promocoes", "desconto", "descontos"} and product is None and category_id is None and max_price is None:
+        if words & {"promocao", "promocoes", "desconto", "descontos", "oferta", "ofertas", "especial", "especiais", "exclusivo", "exclusiva", "black", "friday"} and product is None and category_id is None and max_price is None:
             promotions = self.store.active_promotions()
             if not promotions:
                 return "No momento, não encontrei promoções ativas em produtos disponíveis.", []
-            lines = ["Estas são algumas promoções ativas em estoque:"]
+            lines = [
+                "Não encontrei uma campanha chamada Black Friday cadastrada, mas estas promoções estão ativas em estoque:"
+                if words & {"black", "friday"}
+                else "Estas são algumas promoções ativas em estoque:"
+            ]
             for item, promotion in promotions:
                 lines.append(
                     f"- {item.name}: {format_brl(self.store.effective_price(item))} "
                     f"({promotion.discount_percent:g}% off; era {format_brl(item.price_brl)})."
                 )
-            return "\n".join(lines), self.store.search_grounding(message)
+            grounding = [
+                RetrievedChunk(
+                    title=item.name,
+                    source_type="catalog_promotion",
+                    content=(
+                        f"Produto: {item.name}\nPreço atual: {format_brl(self.store.effective_price(item))}\n"
+                        f"Preço original: {format_brl(item.price_brl)}\nDesconto: {promotion.discount_percent:g}%\n"
+                        f"Promoção: {promotion.description}\nEstoque: {item.stock_quantity}"
+                    ),
+                    score=12.0,
+                    retrieval="structured",
+                )
+                for item, promotion in promotions
+            ]
+            return "\n".join(lines), grounding
 
         if product is not None and (
             normalize(product.name) in query_norm
@@ -1161,6 +1228,10 @@ def route_message(message: str, store: CatalogStore) -> str:
         return "out_of_scope"
 
     words = keyword_set(message)
+    # Promotion language is catalog intent, never policy intent.
+    if words & {"promocao", "promocoes", "desconto", "descontos", "oferta", "ofertas", "especial", "especiais", "exclusivo", "exclusiva", "black", "friday"}:
+        return "catalog"
+
     accessory_only = bool(words & ACCESSORY_TERMS) and not bool(
         words & {
             "instrumento", "violao", "violoes", "guitarra", "guitarras", "baixo",
@@ -1193,7 +1264,7 @@ def route_message(message: str, store: CatalogStore) -> str:
         words & {
             "preco", "custa", "valor", "estoque", "disponivel", "disponibilidade",
             "opcoes", "produto", "catalogo", "promocao", "promocoes", "desconto",
-            "descontos", "tem",
+            "descontos", "oferta", "ofertas", "especial", "especiais", "exclusivo", "exclusiva", "black", "friday", "tem",
         }
     )
     if store.category_id_for(message) is not None or store.best_product_match(message) is not None or catalog_signal:
@@ -1210,6 +1281,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--customer-id", type=int)
     parser.add_argument("--model", default=GEMINI_MODEL)
     parser.add_argument("--no-llm", action="store_true")
+    parser.add_argument("--web", action="store_true", help="inicia a interface web local")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--message", action="append")
     return parser
 
@@ -1217,6 +1291,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[list[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.web:
+            from web import serve
+            serve(args.data_dir, host=args.host, port=args.port, use_llm=not args.no_llm, model=args.model)
+            return 0
         agent = StoreAgent(
             args.data_dir,
             customer_id=args.customer_id,
@@ -1248,6 +1326,10 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+
+
 
 
 
