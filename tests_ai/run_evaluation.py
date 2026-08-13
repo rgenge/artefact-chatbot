@@ -150,6 +150,8 @@ def build_conversations(store: CatalogStore, policy_text: str) -> tuple[list[Con
     takamine = product_named(store, "Takamine GD20")
     yamaha_category = store.category_id_for("violões")
     yamaha = store.brand_products("Yamaha violões", category_id=yamaha_category)
+    all_violoes = store.search_products("violões", category_id=yamaha_category, limit=100)
+    tagima_violoes = store.brand_products("Tagima violões", category_id=yamaha_category)
     active_promotions = store.active_promotions(limit=100)
     unavailable = next(product for product in store.products if not product.available)
     order = store.order_by_reference("8")
@@ -179,6 +181,49 @@ def build_conversations(store: CatalogStore, policy_text: str) -> tuple[list[Con
                         f"{takamine.stock_quantity} unidade(s)",
                     ),
                     note="Price and stock must come from the product CSV.",
+                ),
+            ),
+        ),
+        Conversation(
+            name="typo-tolerant brand retrieval",
+            turns=(
+                Turn(
+                    user="Quais violões yahama estão disponíveis?",
+                    source="catalog",
+                    must_contain=(
+                        f"Encontrei {len(yamaha)} violões da Yamaha",
+                        *(product.name for product in yamaha),
+                    ),
+                    note="A common brand typo must resolve to the complete Yamaha set.",
+                ),
+            ),
+        ),
+        Conversation(
+            name="category preview, pagination, and brand follow-up",
+            turns=(
+                Turn(
+                    user="Quais violões tem?",
+                    source="catalog",
+                    must_contain=(
+                        f"Encontrei {len(all_violoes)} violões disponíveis",
+                        "Mostrando 5 opções",
+                    ),
+                    note="A preview must state the total instead of implying five is the full catalog.",
+                ),
+                Turn(
+                    user="Só esses ?",
+                    source="catalog",
+                    must_contain=("Não.", f"{len(all_violoes)} violões", "apenas 5 opções"),
+                    note="A follow-up must explain that the first answer was paginated.",
+                ),
+                Turn(
+                    user="E da Tagima ?",
+                    source="catalog",
+                    must_contain=(
+                        f"Encontrei {len(tagima_violoes)} violões da Tagima",
+                        *(product.name for product in tagima_violoes),
+                    ),
+                    note="The assistant must retain the instrument category when switching brand.",
                 ),
             ),
         ),
@@ -264,6 +309,35 @@ def build_conversations(store: CatalogStore, policy_text: str) -> tuple[list[Con
                         *(item[1] for item in order_items),
                     ),
                     note="Order status must be joined with order_items, not guessed.",
+                ),
+            ),
+        ),
+        Conversation(
+            name="catalog promotion wording and safe scope",
+            turns=(
+                Turn(
+                    user="Tem algum descomto especial?",
+                    source="catalog",
+                    must_contain=("Kalani KAL-700T Tenor Natural", "10% off"),
+                    note="A frequent typo must still reach active promotion retrieval.",
+                ),
+                Turn(
+                    user="Tem algum com Black Friday?",
+                    source="catalog",
+                    must_contain=(
+                        "novembro",
+                        "15% a 30%",
+                        "não há uma promoção ativa identificada como Black Friday",
+                    ),
+                    must_not_contain=("não encontrei uma campanha chamada Black Friday",),
+                    note="Campaign policy and currently active catalog promotions must not be conflated.",
+                ),
+                Turn(
+                    user="O que tu faz no final de semana?",
+                    source="policy",
+                    must_contain=("instrumentos",),
+                    must_not_contain=("organizar catálogo", "final de semana"),
+                    note="The assistant must not invent a personal life or roleplay outside the store scope.",
                 ),
             ),
         ),

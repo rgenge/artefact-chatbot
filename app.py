@@ -981,6 +981,7 @@ dados pessoais além do necessário para responder ao próprio cliente.
         self.customer_id = customer_id
         self.history: list[dict[str, str]] = []
         self.use_llm = use_llm
+        self.pending_handoffs: list[dict[str, Any]] = []
         self.last_catalog_products: list[Product] = []
         self.last_catalog_offset = 0
         self.last_catalog_label = "produtos"
@@ -1004,14 +1005,14 @@ dados pessoais além do necessário para responder ao próprio cliente.
         if not message:
             return "Pode me contar como posso ajudar?"
         self._remember_customer(message)
+        catalog_follow_up = is_catalog_follow_up(message)
         catalog_message = message
-        if is_catalog_follow_up(message):
-            previous_user = self.last_catalog_query or next(
-                (item["content"] for item in reversed(self.history) if item["role"] == "user"),
-                "",
-            )
-            if previous_user and (self.last_catalog_query or route_message(previous_user, self.store) == "catalog"):
-                catalog_message = previous_user + " " + message
+        previous_user = self.last_catalog_query or next(
+            (item["content"] for item in reversed(self.history) if item["role"] == "user"),
+            "",
+        )
+        if catalog_follow_up and previous_user and (self.last_catalog_query or route_message(previous_user, self.store) == "catalog"):
+            catalog_message = previous_user + " " + message
         intent = route_message(catalog_message, self.store)
 
         if intent == "greeting":
@@ -1020,9 +1021,13 @@ dados pessoais além do necessário para responder ao próprio cliente.
         elif intent == "out_of_scope":
             answer = self._out_of_scope()
             grounding = []
+        elif intent == "handoff":
+            answer, grounding = self._handoff_answer(message)
         elif intent == "catalog":
             answer, grounding = self._catalog_answer(catalog_message)
-            self.last_catalog_query = catalog_message
+            brand_switch_follow_up = bool(re.fullmatch(r"e(?: da| do| das| dos| a| o)? [a-z0-9-]+", normalize(message).strip("?!., ")))
+            if not catalog_follow_up or brand_switch_follow_up:
+                self.last_catalog_query = catalog_message
         elif intent == "order":
             answer, grounding = self._order_answer(message)
         elif intent == "policy":
@@ -1350,15 +1355,15 @@ dados pessoais além do necessário para responder ao próprio cliente.
         elif words & {"endereco", "localizacao", "onde"}:
             answer = "A loja fica na Rua 14 de Maio, 3200, Centro, Campo Grande/MS, CEP 79202-333."
         elif words & {"pagamento", "pix", "boleto", "cartao", "parcelamento"}:
-            answer = "Aceitamos PIX, débito, crédito em até 12x sem juros e boleto. O PIX tem 5% de desconto, mas não é cumulativo com promoções."
+            answer = "Aceitamos PIX (pagamento à vista com 5% de desconto sobre o preço de tabela, mas não é cumulativo), débito, crédito em até 12x sem juros (parcela mínima de R$ 100,00) e boleto à vista. De 4x a 6x, a parcela mínima é R$ 80,00; de 7x a 12x, R$ 100,00. É permitida a combinação de formas de pagamento, como PIX + cartão, para compras acima de R$ 2.000,00."
         elif words & {"devolucao", "devolver", "arrependimento", "reembolso"}:
-            answer = "Em compras online, você pode pedir devolução em até 7 dias corridos após o recebimento, sem justificativa. O produto deve estar sem uso e na embalagem original; o reembolso ocorre na forma de pagamento original em até 10 dias úteis."
+            answer = "Em compras online, você pode pedir devolução em até 7 dias corridos após o recebimento, sem justificativa. O produto deve estar na embalagem original, sem sinais de uso e com todos os acessórios e manuais. O reembolso ocorre na forma de pagamento original em até 10 dias úteis; o frete de devolução é por conta da loja em caso de arrependimento."
         elif words & {"troca", "trocar", "preferencia", "modelo", "cor"}:
             answer = "Trocas por preferência são permitidas em até 7 dias, conforme disponibilidade, com o produto em perfeito estado e na embalagem original."
         elif words & {"defeito", "garantia"}:
-            answer = "Defeitos de fabricação podem ser tratados em até 30 dias para troca; todos os produtos também têm garantia legal de 90 dias a partir do recebimento. Mau uso, quedas e modificações não autorizadas não são cobertos."
+            answer = "Defeitos de fabricação podem ser tratados em até 30 dias corridos para troca. Após esse prazo, o cliente deve acionar a garantia diretamente com o fabricante; a loja pode intermediar. A garantia legal é de 90 dias, e a garantia do fabricante pode variar de 6 meses a 2 anos. Mau uso, quedas, umidade extrema e modificações não autorizadas não são cobertos."
         elif words & {"frete", "entrega", "entregas"}:
-            answer = "Na região metropolitana de Campo Grande, o frete é grátis acima de R$ 500 e custa R$ 35 abaixo disso, com prazo de 1 a 3 dias úteis. Para outras cidades, o valor depende do CEP, peso e dimensões."
+            answer = "Na região metropolitana de Campo Grande, o frete é grátis acima de R$ 500 e custa R$ 35 abaixo disso, com prazo de 1 a 3 dias úteis; a entrega é feita por motoboy próprio; o cliente é contactado por telefone antes do despacho. Para outras cidades, o cálculo depende de CEP, peso e dimensões: PAC leva 5 a 12 dias úteis, SEDEX 2 a 5 e Jadlog 3 a 8, todos com seguro contra extravios."
         elif words & {"privacidade", "lgpd", "dados", "exclusao"}:
             answer = "Os dados são usados para processar pedidos, comunicar status e cumprir obrigações legais; não são compartilhados para marketing sem consentimento. A exclusão pode ser solicitada pelo WhatsApp ou e-mail."
         elif words & {"black", "friday"}:

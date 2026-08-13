@@ -77,6 +77,52 @@ class StoreAgentTests(unittest.TestCase):
         self.assertIn("Encontrei 7 violões", answer)
         self.assertIn("Yamaha CG162S Nylon Natural", answer)
 
+    def test_brand_typo_is_corrected_and_lists_all_models(self):
+        agent = StoreAgent(DATA, use_llm=False)
+        answer = agent.handle("Quais violões yahama tem?")
+        self.assertIn("Encontrei 7 violões da Yamaha", answer)
+        self.assertIn("Yamaha NTX1 Elétrico Nylon Natural", answer)
+        self.assertIn("Yamaha CG162S Nylon Natural", answer)
+
+    def test_generic_category_reports_total_and_preview(self):
+        agent = StoreAgent(DATA, use_llm=False)
+        answer = agent.handle("Quais violões tem?")
+        self.assertIn("Encontrei 33 violões disponíveis", answer)
+        self.assertIn("Mostrando 5 opções", answer)
+
+    def test_generic_follow_up_explains_preview_and_more_results(self):
+        agent = StoreAgent(DATA, use_llm=False)
+        agent.handle("Quais violões tem?")
+        answer = agent.handle("Só esses ?")
+        self.assertIn("Não.", answer)
+        self.assertIn("33 violões", answer)
+        self.assertIn("apenas 5 opções", answer)
+
+        more = agent.handle("Tem mais?")
+        self.assertIn("Sim, há mais violões", more)
+        self.assertNotIn("Tagima Memphis AC-39 Nylon Natural", more)
+
+    def test_brand_follow_up_preserves_category_context(self):
+        agent = StoreAgent(DATA, use_llm=False)
+        agent.handle("Quais violões tem?")
+        answer = agent.handle("E da Tagima ?")
+        self.assertIn("Encontrei 6 violões da Tagima", answer)
+        self.assertIn("Tagima Vegas Elétrico Aço Natural", answer)
+
+    def test_unknown_question_does_not_invent_personal_life(self):
+        agent = StoreAgent(DATA, use_llm=False)
+        answer = agent.handle("O que tu faz no final de semana?")
+        self.assertIn("instrumentos", answer.lower())
+        self.assertNotIn("organizar catálogo", answer.lower())
+        self.assertNotIn("final de semana", answer.lower())
+
+    def test_black_friday_distinguishes_policy_from_active_promotions(self):
+        agent = StoreAgent(DATA, use_llm=False)
+        answer = agent.handle("Tem algum com Black Friday?")
+        self.assertIn("novembro", answer)
+        self.assertIn("15% a 30%", answer)
+        self.assertIn("não há uma promoção ativa identificada como Black Friday", answer)
+
     def test_accessory_scope_is_explicit(self):
         agent = StoreAgent(DATA, use_llm=False)
         answer = agent.handle("Vocês vendem cabos e palhetas?")
