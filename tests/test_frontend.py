@@ -160,5 +160,37 @@ class FrontendChatTests(unittest.TestCase):
         self.assertNotIn("2x Tagima Memphis AC-39 Nylon Natural", second)
         self.assertIn("crédito em 2x", second)
         self.assertIn("pedido ainda não foi criado", second)
+    def test_real_api_completes_short_choice_and_split_checkout_data(self):
+        conversation = "frontend-yamaha-c40-final-checkout"
+        listing = self.ask("hum e violão normal da yamaha?", conversation_id=conversation)
+        self.assertIn("Encontrei 7 violões da Yamaha", listing)
+
+        choice = self.ask("Quero o C40", conversation_id=conversation)
+        self.assertIn("Yamaha C40 Nylon Natural: R$ 599,90", choice)
+        self.assertNotIn("Pode reformular", choice)
+
+        selected = self.ask("Quero comprar o C40", conversation_id=conversation)
+        self.assertIn("Perfeito! Selecionei 1x Yamaha C40 Nylon Natural", selected)
+        self.assertIn("nome completo", selected)
+
+        data = self.ask(
+            "Atila, 679999999, tEste@teste.com.br, rua teste, 556",
+            conversation_id=conversation,
+        )
+        self.assertIn("forma de pagamento", data)
+        self.assertNotIn("nome completo", data)
+
+        installment = self.ask(
+            "Atila da Silva, pagamento em 3 x",
+            conversation_id=conversation,
+        )
+        self.assertIn("crédito em 3x", installment)
+        self.assertIn("pedido ainda não foi criado", installment)
+        self.assertNotIn("Aceitamos PIX", installment)
+
+        pix = self.ask("pode ser pix", conversation_id=conversation)
+        self.assertIn("pagamento em PIX", pix)
+        self.assertNotIn("em 3x", pix)
+        self.assertNotIn("Pode reformular", pix)
 if __name__ == "__main__":
     unittest.main()

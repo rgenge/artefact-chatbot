@@ -503,6 +503,42 @@ class StoreAgentTests(unittest.TestCase):
         self.assertIn("Encontrei 33 violões disponíveis", answer)
         self.assertNotIn("PAC", answer)
         self.assertNotIn("Pode reformular", answer)
+    def test_short_catalog_choice_enters_checkout_with_previous_list_context(self):
+        agent = StoreAgent(DATA, use_llm=False)
+        listing = agent.handle("hum e violão normal da yamaha?")
+        self.assertIn("Encontrei 7 violões da Yamaha", listing)
+
+        choice = agent.handle("Quero o C40")
+        self.assertIn("Yamaha C40 Nylon Natural: R$ 599,90", choice)
+        self.assertNotIn("Pode reformular", choice)
+
+        selected = agent.handle("Quero comprar o C40")
+        self.assertIn("Perfeito! Selecionei 1x Yamaha C40 Nylon Natural", selected)
+        self.assertIn("nome completo", selected)
+
+    def test_checkout_reaches_final_confirmation_after_separate_name_and_payment_turns(self):
+        agent = StoreAgent(DATA, use_llm=False)
+        agent.handle("hum e violão normal da yamaha?")
+        agent.handle("Quero o C40")
+        agent.handle("Quero comprar o C40")
+
+        data = agent.handle("Atila, 679999999, tEste@teste.com.br, rua teste, 556")
+        self.assertIn("forma de pagamento", data)
+        self.assertNotIn("nome completo", data)
+        self.assertNotIn("telefone ou e-mail", data)
+
+        installment = agent.handle("Atila da Silva, pagamento em 3 x")
+        self.assertIn("crédito em 3x", installment)
+        self.assertIn("pedido ainda não foi criado", installment)
+        self.assertNotIn("Aceitamos PIX", installment)
+        self.assertNotIn("nome completo", installment)
+
+        pix = agent.handle("pode ser pix")
+        self.assertIn("pagamento em PIX", pix)
+        self.assertNotIn("em 3x", pix)
+        self.assertNotIn("nome completo", pix)
+        self.assertNotIn("Pode reformular", pix)
+        self.assertEqual(agent.checkout_quantity, 1)
 if __name__ == "__main__":
     unittest.main()
 

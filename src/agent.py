@@ -198,21 +198,32 @@ produto selecionado, etapa da compra, política recuperada ou limites operaciona
             )
 
         contextual_product = self._recent_catalog_choice(message)
-        if self.checkout_active and contextual_product is not None:
+        if contextual_product is not None:
+            # A short choice such as "Quero o C40" is resolved against the
+            # immediately preceding deterministic list, even before checkout.
             self.last_selected_product = contextual_product
-            self.checkout_product_id = contextual_product.product_id
-            self.checkout_confirmed = True
+            if self.checkout_active:
+                self.checkout_product_id = contextual_product.product_id
+                self.checkout_confirmed = True
+            elif is_checkout_request(message):
+                self.checkout_product_id = contextual_product.product_id
+                self.checkout_confirmed = True
 
         exchange_continuation = self.exchange_active and is_exchange_continuation(message, self.store)
         checkout_continuation = self.checkout_active and (
             contextual_product is not None
             or is_checkout_continuation(message, self.store)
         )
+        contextual_catalog_choice = contextual_product is not None and not is_checkout_request(message)
+        if contextual_catalog_choice:
+            catalog_message = contextual_product.name
         intent = (
             "exchange"
             if exchange_continuation
             else "checkout"
             if checkout_continuation
+            else "catalog"
+            if contextual_catalog_choice
             else route_message(catalog_message, self.store, allow_handoff=self.handoff_enabled)
         )
         if (
@@ -315,6 +326,11 @@ produto selecionado, etapa da compra, política recuperada ou limites operaciona
             f"Intent atual: {intent}\n"
             f"Compra em andamento: {'sim' if self.checkout_active else 'não'}\n"
             f"Produto selecionado: {selected.name if selected else 'nenhum'}\n"
+            f"Dados da compra: nome={self.checkout_customer_name or 'pendente'}; "
+            f"contato={self.checkout_contact or 'pendente'}; "
+            f"endereço={self.checkout_address or 'pendente'}; "
+            f"pagamento={self.checkout_payment_method or 'pendente'}; "
+            f"parcelas={self.checkout_installments or 'não informado'}\n"
             f"Rascunho seguro do fluxo: {draft_answer or 'nenhum'}"
         )
         list_all_instruction = (
@@ -406,6 +422,9 @@ produto selecionado, etapa da compra, política recuperada ou limites operaciona
         for quantity in re.findall(r"\b\d{1,2}x\b", normalized_draft):
             if quantity not in normalized_answer:
                 return False
+        for workflow_phrase in ("em nome de", "contato", "endereco", "pagamento em"):
+            if workflow_phrase in normalized_draft and workflow_phrase not in normalized_answer:
+                return False
         for product in store.products:
             name = normalize(product.name)
             if len(name) >= 12 and name in normalized_draft and name not in normalized_answer:
@@ -494,6 +513,10 @@ produto selecionado, etapa da compra, política recuperada ou limites operaciona
         payment_method, installments = extract_checkout_payment(message)
         if payment_method:
             self.checkout_payment_method = payment_method
+            if payment_method in {"PIX", "débito", "boleto"}:
+                # These methods are à vista; a later PIX choice replaces any
+                # previously collected credit-card installment count.
+                self.checkout_installments = None
         if installments is not None:
             self.checkout_installments = installments
         if is_checkout_selection_confirmation(message) or named is not None:
@@ -1035,8 +1058,31 @@ def extract_delivery_address(message: str) -> Optional[str]:
     return " ".join(address.strip(" ,.;").split()) or None
 
 
+def _valid_checkout_name(candidate: str) -> Optional[str]:
+    candidate = re.split(
+        r"\b(?:telefone|celular|fone|e-?mail|pagamento|pagar|pix|credito|cartao|boleto|debito|endereco)\b",
+        candidate,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    candidate = " ".join(candidate.strip(" ,:;-.").split())
+    if not candidate or re.search(r"\d|@", candidate):
+        return None
+    words = re.findall(r"[A-Za-zÀ-ÿ]+", candidate)
+    if not 1 <= len(words) <= 5:
+        return None
+    normalized = normalize(candidate)
+    if set(normalized.split()) & {
+        "sim", "isso", "confirmo", "quero", "comprar", "adquirir", "levar",
+        "ah", "pode", "ser", "esse", "essa", "mesmo", "prefiro", "escolho", "modelo",
+        "qual", "politica", "preco", "estoque", "disponivel", "instrumento",
+    }:
+        return None
+    return candidate
+
+
 def extract_checkout_name(message: str) -> Optional[str]:
-    """Extract a customer name without treating an arbitrary product sentence as one."""
+    """Extract a customer name without treating a product query as one."""
 
     address_match = re.search(
         r"\b(?:rua|avenida|av|alameda|travessa|estrada|rodovia|pra[cç]a)\b",
@@ -1050,30 +1096,28 @@ def extract_checkout_name(message: str) -> Optional[str]:
         re.IGNORECASE,
     )
     if explicit:
-        candidate = " ".join(explicit.group(1).split()).strip()
-        if candidate:
-            return candidate
+        name = _valid_checkout_name(explicit.group(1))
+        if name:
+            return name
 
-    # Implicit names are accepted only in a comma-separated data message such as
-    # "Sim, 1 apenas, Atila Carlos, 67...".
-    if "," not in before_address:
-        return None
-    for part in before_address.split(","):
-        candidate = re.sub(
-            r"^\s*(?:sim|isso|confirmo|pode ser)\s*[:\-]?\s*",
-            "",
-            part,
-            flags=re.IGNORECASE,
-        ).strip()
-        if not candidate or re.search(
-            r"\d|@|\b(?:telefone|celular|fone|pagarei|pagar|credito|cartao|pix|boleto|debito)\b",
-            candidate,
-            re.IGNORECASE,
-        ):
-            continue
-        words = re.findall(r"[A-Za-zÀ-ÿ]+", candidate)
-        if len(words) >= 2:
-            return " ".join(words)
+    # Comma-separated checkout data may contain a one-word name, e.g.
+    # "Atila, 679999999, email@site.com, Rua ...".
+    if "," in before_address:
+        for part in before_address.split(","):
+            candidate = re.sub(
+                r"^\s*(?:sim|isso|confirmo|pode ser)\s*[:\-]?\s*",
+                "",
+                part,
+                flags=re.IGNORECASE,
+            ).strip()
+            name = _valid_checkout_name(candidate)
+            if name:
+                return name
+
+    # A later standalone correction such as "Atila da Silva" should remain in
+    # checkout while ordinary questions are rejected by the validation above.
+    if not re.search(r"[?!]", message) and "," not in message:
+        return _valid_checkout_name(message)
     return None
 
 
@@ -1099,10 +1143,15 @@ def extract_checkout_payment(message: str) -> tuple[Optional[str], Optional[int]
         None,
     )
     installments = None
-    if method:
-        match = re.search(r"\b(\d{1,2})\s*x\b", normalized)
-        if match:
-            installments = int(match.group(1))
+    match = re.search(r"\b(\d{1,2})\s*x\b", normalized)
+    if match and (
+        method
+        or re.search(r"\b(?:pagamento|parcel|parcelado|vezes)\b", normalized)
+    ):
+        installments = int(match.group(1))
+        # In this store, an installment count means credit-card payment unless
+        # the customer later chooses an à-vista method such as PIX.
+        method = method or "crédito"
     return method, installments
 
 
@@ -1174,8 +1223,12 @@ def is_checkout_continuation(message: str, store: CatalogStore) -> bool:
         normalized,
     ):
         return True
-    # Quantity and payment-only replies must stay in the active checkout.
-    if extract_quantity(message) is not None or extract_checkout_payment(message)[0] is not None:
+    # Quantity, customer-name and payment-only replies must stay in checkout.
+    if (
+        extract_quantity(message) is not None
+        or extract_checkout_name(message) is not None
+        or extract_checkout_payment(message)[0] is not None
+    ):
         return True
     if re.search(r"@|\+?\d[\d ()-]{7,}", message):
         return True
