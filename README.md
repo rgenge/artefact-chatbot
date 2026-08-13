@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Empório da Música — agente Gemini
 
 Protótipo Python do agente de atendimento pedido no desafio. A arquitetura segue o processo do TwinTweaker:
@@ -71,7 +70,11 @@ Veja [examples/conversations.md](examples/conversations.md) para os cenários ex
 
 A base é um snapshot local e não há autenticação real de cliente. O índice de embeddings é reconstruído ao iniciar o processo, em vez de persistir em pgvector/Supabase como no TwinTweaker. Em produção eu persistiria chunks e embeddings, adicionaria atualização incremental, observabilidade, handoff humano e avaliação contínua de recall/grounding.
 
-=======
-# artefact-chatbot
-Chatbot with RAG system using gemini 3.1 for a store.
->>>>>>> 94b085f10f7a775b715841b5a3ae8d1d6070f8a6
+
+## Como o RAG e o catálogo trabalham juntos
+
+O fluxo separa duas fontes de verdade. O catálogo (produtos, categorias, promoções, clientes e pedidos) é carregado dos CSVs e consultado com filtros, normalização e joins determinísticos. Assim, preço, estoque, desconto e status de pedido não são adivinhados por similaridade semântica.
+
+O manual de políticas é extraído do PDF e dividido em chunks de 1.400 caracteres, com overlap de 180. Cada chunk pode ser recuperado por palavras-chave (termos exatos) ou por similaridade de embeddings Gemini (perguntas com redação diferente). O ranking híbrido envia os melhores chunks ao Gemini 3.1 Flash junto com o histórico. Uma validação local bloqueia valores monetários ausentes do contexto.
+
+A UI (`python app.py --web`, em `http://127.0.0.1:8000`) usa exatamente o mesmo `StoreAgent`: cada pergunta é roteada para catálogo, pedido ou política sem duplicar a lógica.
