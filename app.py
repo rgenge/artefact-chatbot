@@ -202,8 +202,15 @@ def keyword_set(value: Any) -> set[str]:
 
 
 def query_model_numbers(value: str) -> list[str]:
+    normalized = normalize(value)
+    # A budget ("até R$ 1000") is a price, not a model number. Left in, it makes
+    # the query look model-specific and suppresses brand listings.
+    normalized = re.sub(
+        r"(?:ate|menos de|abaixo de|no maximo|por ate)\s*(?:r\$)?\s*[\d.,]+", " ", normalized
+    )
+    normalized = re.sub(r"r\$\s*[\d.,]+", " ", normalized)
     result: list[str] = []
-    for token in re.findall(r"[a-z0-9]+", normalize(value)):
+    for token in re.findall(r"[a-z0-9]+", normalized):
         if re.fullmatch(r"(?:19|20)\d{2}", token):
             continue
         if re.fullmatch(r"\d{2,4}", token) or re.fullmatch(r"[a-z]\d{1,3}", token):
@@ -1013,6 +1020,9 @@ dados pessoais além do necessário para responder ao próprio cliente.
         self.checkout_address: Optional[str] = None
         self.checkout_quantity = 1
         self.checkout_confirmed = False
+        self.exchange_active = False
+        self.exchange_product_id: Optional[int] = None
+        self.exchange_received_date: Optional[str] = None
 
     @property
     def customer(self) -> Optional[Customer]:
@@ -1040,9 +1050,12 @@ dados pessoais além do necessário para responder ao próprio cliente.
         )
         if catalog_follow_up and previous_user and (self.last_catalog_query or route_message(previous_user, self.store) == "catalog"):
             catalog_message = previous_user + " " + message
+        exchange_continuation = self.exchange_active and is_exchange_continuation(message, self.store)
         checkout_continuation = self.checkout_active and is_checkout_continuation(message, self.store)
         intent = (
-            "checkout"
+            "exchange"
+            if exchange_continuation
+            else "checkout"
             if checkout_continuation
             else route_message(catalog_message, self.store, allow_handoff=self.handoff_enabled)
         )
@@ -1053,10 +1066,15 @@ dados pessoais além do necessário para responder ao próprio cliente.
         elif intent == "out_of_scope":
             answer = self._out_of_scope()
             grounding = []
+        elif intent == "injection":
+            answer = self._injection()
+            grounding = []
         elif intent == "handoff":
             answer, grounding = self._handoff_answer(message)
         elif intent == "checkout":
             answer, grounding = self._checkout_answer(message)
+        elif intent == "exchange":
+            answer, grounding = self._exchange_answer(message)
         elif intent == "catalog":
             answer, grounding = self._catalog_answer(catalog_message)
             brand_switch_follow_up = bool(re.fullmatch(r"e(?: da| do| das| dos| a| o)? [a-z0-9-]+", normalize(message).strip("?!., ")))
@@ -1069,7 +1087,10 @@ dados pessoais além do necessário para responder ao próprio cliente.
         else:
             answer, grounding = self._unknown(), []
 
-        if (self.use_llm and self.client.enabled and intent in {"catalog", "order", "policy", "unknown"} and not (intent == "unknown" and not grounding) and not self._is_structured_catalog_list(intent, grounding)):
+        # Only rewrite when there is retrieved evidence to rewrite from. With no
+        # grounding the answer is a deterministic refusal ("identify yourself",
+        # "no rule found"), and a free rewrite drops the guarantee it carries.
+        if (self.use_llm and self.client.enabled and grounding and intent in {"catalog", "order", "policy", "unknown"} and not self._is_structured_catalog_list(intent, grounding)):
             generated = self._gemini_answer(catalog_message if intent == "catalog" else message, grounding)
             if generated and self._response_is_grounded(generated, grounding):
                 answer = generated
@@ -1151,6 +1172,15 @@ dados pessoais além do necessário para responder ao próprio cliente.
         return (
             "A Empório da Música trabalha exclusivamente com instrumentos musicais; não vendemos "
             "cordas, cabos, palhetas, cases, pedais ou amplificadores. Posso ajudar com instrumentos."
+        )
+
+    @staticmethod
+    def _injection() -> str:
+        # Holds scope without repeating the accessory message, which reads as a
+        # non-sequitur here, and without naming what is being protected.
+        return (
+            "Não consigo compartilhar minhas configurações de atendimento. Posso ajudar "
+            "com instrumentos musicais, preços, estoque, pedidos e políticas da loja."
         )
 
     @staticmethod
@@ -1239,6 +1269,67 @@ dados pessoais além do necessário para responder ao próprio cliente.
             f"Encontrei {item}; temos {product.stock_quantity} unidade(s) disponíveis. "
             "Você quer esse modelo? Se sim, confirme a quantidade e envie nome completo, "
             "telefone ou e-mail e endereço de entrega.",
+            grounding,
+        )
+    def _exchange_answer(self, message: str) -> tuple[str, list[RetrievedChunk]]:
+        """Continue an exchange case while keeping facts split by source.
+
+        The product row is deterministic catalog grounding. The exchange rule is
+        retrieved from the policy PDF. No customer, order, or order-item table is
+        needed to clarify eligibility.
+        """
+        self.exchange_active = True
+        policy_chunks = self.rag.search(
+            "troca por preferência 7 dias corridos após recebimento "
+            "produto perfeito estado embalagem original disponibilidade"
+        )
+        named = self.store.best_product_match(message)
+        product = named
+        if named is not None:
+            self.exchange_product_id = named.product_id
+        elif self.exchange_product_id is not None:
+            product = self.store.products_by_id.get(self.exchange_product_id)
+
+        received_date = extract_exchange_date(message)
+        if received_date:
+            self.exchange_received_date = received_date
+
+        grounding = (
+            self.store.grounding_for_products([product]) if product is not None else []
+        )
+        grounding.extend(policy_chunks)
+
+        if product is None:
+            return (
+                "Entendi. Para verificar a troca por preferência, informe o modelo do "
+                "violão e a data em que você recebeu o pedido. A política prevê até "
+                "7 dias corridos após o recebimento, com o produto em perfeito estado "
+                "e na embalagem original.",
+                grounding,
+            )
+
+        price = format_brl(self.store.effective_price(product))
+        stock = (
+            f" O catálogo registra {product.stock_quantity} unidade(s) disponíveis."
+            if product.available
+            else " O catálogo registra que esse modelo está indisponível no momento."
+        )
+        if self.exchange_received_date:
+            return (
+                f"Encontrei o {product.name}: {price}.{stock} Para troca por preferência, "
+                "a política permite solicitar em até 7 dias corridos após o recebimento, "
+                "conforme disponibilidade, com o instrumento em perfeito estado e na "
+                f"embalagem original. Você informou {self.exchange_received_date}; essa "
+                "data precisa ser a de recebimento, e ainda preciso confirmar o ano. "
+                "Também me diga qual modelo deseja no lugar; eventual diferença de valor "
+                "pode ser cobrada ou reembolsada.",
+                grounding,
+            )
+        return (
+            f"Encontrei o {product.name}: {price}.{stock} Para validar a troca por "
+            "preferência, preciso da data de recebimento, do estado do instrumento e "
+            "do modelo que você deseja no lugar. A política exige até 7 dias corridos "
+            "após o recebimento e a embalagem original.",
             grounding,
         )
     def _handoff_answer(self, message: str) -> tuple[str, list[RetrievedChunk]]:
@@ -1384,12 +1475,20 @@ dados pessoais além do necessário para responder ao próprio cliente.
         if category_id is not None and follow_up and same_context:
             if re.search(r"\b(?:so tem|so esses|sao esses|apenas|somente)\b", normalized_query):
                 shown = min(self.last_catalog_offset or 5, len(all_products))
+                # "Não, havia mais" only makes sense when the list was truncated;
+                # after a complete answer the honest reply is "sim, são todos".
+                if shown >= len(all_products):
+                    return (
+                        f"Sim, esses são todos os {len(all_products)} {label} "
+                        f"disponíveis{budget}. Posso filtrar por marca, tipo ou faixa de preço.",
+                        self.store.grounding_for_products(all_products),
+                    )
                 return (
                     f"Não. Encontrei {len(all_products)} {label} disponíveis{budget}. "
                     f"A lista anterior mostrava apenas {shown} opções; posso filtrar por marca, tipo ou faixa de preço.",
                     self.store.grounding_for_products(all_products[:shown]),
                 )
-            if re.search(r"\b(?:tem mais|mais|outros)\b", normalized_query):
+            if re.search(r"\b(?:tem mais|mais|outros|restante|restantes|o que falta|faltam)\b", normalized_query):
                 start_offset = min(self.last_catalog_offset, len(all_products))
                 page = all_products[start_offset:start_offset + 5]
                 if page:
@@ -1402,11 +1501,14 @@ dados pessoais além do necessário para responder ao próprio cliente.
                             price_text += f" ({promotion.discount_percent:g}% off; era {format_brl(item.price_brl)})"
                         lines.append(f"- {item.name}: {price_text}; {item.stock_quantity} em estoque.")
                     return "\n".join(lines), self.store.grounding_for_products(page)
-                return f"Já mostrei todas as {label} disponíveis nesta busca ({len(all_products)} no total).", self.store.grounding_for_products(all_products)
+                return f"Já mostrei todos os {label} disponíveis nesta busca ({len(all_products)} no total).", self.store.grounding_for_products(all_products)
 
         if category_id is not None:
             self.last_selected_product = None
-            products = all_products[:5]
+            # Small filtered sets are complete answers; broad category searches
+            # remain paginated to keep the chat readable.
+            show_all_filtered = max_price is not None and len(all_products) <= 15
+            products = all_products if show_all_filtered else all_products[:5]
             self.last_catalog_products = all_products
             self.last_catalog_offset = len(products)
             self.last_catalog_label = label
@@ -1474,6 +1576,16 @@ dados pessoais além do necessário para responder ao próprio cliente.
             answer = "A loja fica na Rua 14 de Maio, 3200, Centro, Campo Grande/MS, CEP 79202-333."
         elif words & {"pagamento", "pix", "boleto", "cartao", "parcelamento"}:
             answer = "Aceitamos PIX (pagamento à vista com 5% de desconto sobre o preço de tabela, mas não é cumulativo), débito, crédito em até 12x sem juros (parcela mínima de R$ 100,00) e boleto à vista. De 4x a 6x, a parcela mínima é R$ 80,00; de 7x a 12x, R$ 100,00. É permitida a combinação de formas de pagamento, como PIX + cartão, para compras acima de R$ 2.000,00."
+        elif is_exchange_request(message):
+            self.exchange_active = True
+            self.exchange_product_id = None
+            self.exchange_received_date = None
+            answer = (
+                "Entendi. Para troca por preferência, a política permite solicitar em "
+                "até 7 dias corridos após o recebimento, conforme disponibilidade, com "
+                "o instrumento em perfeito estado e na embalagem original. Informe o "
+                "modelo, a data de recebimento e qual modelo você deseja no lugar."
+            )
         elif words & {"devolucao", "devolver", "arrependimento", "reembolso"}:
             answer = "Em compras online, você pode pedir devolução em até 7 dias corridos após o recebimento, sem justificativa. O produto deve estar na embalagem original, sem sinais de uso e com todos os acessórios e manuais. O reembolso ocorre na forma de pagamento original em até 10 dias úteis; o frete de devolução é por conta da loja em caso de arrependimento."
         elif words & {"troca", "trocar", "preferencia", "modelo", "cor"}:
@@ -1511,13 +1623,14 @@ def extract_order_reference(message: str) -> Optional[str]:
 
 
 def is_greeting(message: str) -> bool:
-    return bool(re.fullmatch(r"\s*(oi|ola|olá|bom dia|boa tarde|boa noite|hello|hi)[!. ]*", message, re.I))
+    return bool(re.fullmatch(r"\s*(oi|oie+|ola|olá|bom dia|boa tarde|boa noite|hello|hi)[!. ]*", message, re.I))
 
 
 def is_catalog_follow_up(message: str) -> bool:
     normalized = normalize(message).strip("?!., ")
     return bool(
-        re.search(r"\b(?:todos|todas|cada|lista completa|mais modelos?|so tem esses|so esses|tem mais|tem outros|sao todos|sao esses|apenas esses|somente esses)\b", normalized)
+        re.search(r"\b(?:todos|todas|cada|lista completa|mais modelos?|so tem esses|so esses|tem mais|tem outros|sao todos|sao esses|apenas esses|somente esses|restante|restantes|o que falta|faltam|outros|outras)\b", normalized)
+        or re.search(r"\b(?:quais|qual|que|mostre|mostrar|ver|lista(?:r)?)\s+(?:mais|outros|outras|restantes)\b", normalized)
         or re.fullmatch(r"e(?: da| do| das| dos| a| o)? [a-z0-9-]+", normalized)
     )
 
@@ -1603,6 +1716,51 @@ def is_checkout_continuation(message: str, store: CatalogStore) -> bool:
         return True
     return False
 
+def is_exchange_request(message: str) -> bool:
+    normalized = normalize(message)
+    return bool(
+        re.search(r"\bnao\s+(?:gostei|gistei)\b", normalized)
+        or re.search(r"\b(?:troca por preferencia|trocar de modelo|mudar de modelo)\b", normalized)
+        or re.search(r"\b(?:trocar|troca)\b.{0,80}\b(?:violao|instrumento|modelo|cor)\b", normalized)
+        or re.search(r"\b(?:quero|gostaria|preciso|posso|vou)\b.{0,40}\b(?:trocar|fazer uma troca)\b", normalized)
+    )
+
+
+def extract_exchange_date(message: str) -> Optional[str]:
+    match = re.search(
+        r"\b(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?\b",
+        message,
+    )
+    if not match:
+        return None
+    day, month = int(match.group(1)), int(match.group(2))
+    if not 1 <= day <= 31 or not 1 <= month <= 12:
+        return None
+    year = match.group(3)
+    if year:
+        year = year if len(year) == 4 else f"20{year.zfill(2)}"
+        return f"{day:02d}/{month:02d}/{year}"
+    return f"{day:02d}/{month:02d}"
+
+
+def is_exchange_continuation(message: str, store: CatalogStore) -> bool:
+    normalized = normalize(message)
+    if extract_exchange_date(message):
+        return True
+    if re.search(
+        r"\b(?:recebi|recebimento|comprei|compra|data|quando|embalagem|"
+        r"sem uso|perfeito estado|acessorios|manuais)\b",
+        normalized,
+    ):
+        return True
+    product = store.best_product_match(message)
+    if product is not None and not re.search(
+        r"\b(?:quais|qual|preco|custa|valor|estoque|disponivel|tem|opcoes)\b",
+        normalized,
+    ):
+        return True
+    return False
+
 def needs_human_handoff(message: str) -> bool:
     normalized = normalize(message)
     return any(re.search(pattern, normalized) for pattern in HANDOFF_PATTERNS)
@@ -1625,7 +1783,7 @@ def route_message(message: str, store: CatalogStore, *, allow_handoff: bool = Tr
     if is_greeting(message):
         return "greeting"
     if is_injection(message):
-        return "out_of_scope"
+        return "injection"
     # Escalation comes before catalog: "meu violão está atrasado" names a
     # product, but it is a support case, not a search.
     if allow_handoff and needs_human_handoff(message):
@@ -1647,7 +1805,8 @@ def route_message(message: str, store: CatalogStore, *, allow_handoff: bool = Tr
         words & {"pedido", "pedidos", "ordem", "compra", "rastrear", "rastreamento", "tracking", "status", "despachado"}
     )
     policy_signal = bool(
-        words & {
+        is_exchange_request(message)
+        or words & {
             "devolucao", "devolver", "arrependimento", "troca", "trocar", "defeito",
             "garantia", "pagamento", "pix", "boleto", "cartao", "horario",
             "expediente", "endereco", "localizacao", "frete", "entrega",
