@@ -44,6 +44,23 @@ class StoreAgentTests(unittest.TestCase):
         self.assertIn("rastreamento", answer.lower())
         self.assertIn("Kala KA-C Concert Mogno", answer)
 
+    def test_brand_query_lists_all_models_and_follow_up(self):
+        agent = StoreAgent(DATA, use_llm=False)
+        answer = agent.handle("Quais violões Yamaha tem?")
+        for model in (
+            "Yamaha C40 Nylon Natural",
+            "Yamaha C70 Nylon Natural",
+            "Yamaha F310 Aço Natural",
+            "Yamaha FG800 Dreadnought Natural",
+            "Yamaha NTX1 Elétrico Nylon Natural",
+            "Yamaha APX600 Elétrico Aço Preto",
+            "Yamaha CG162S Nylon Natural",
+        ):
+            self.assertIn(model, answer)
+        self.assertIn("Encontrei 7 violões", answer)
+        follow_up = agent.handle("Quero saber todos")
+        self.assertIn("Yamaha CG162S Nylon Natural", follow_up)
+
     def test_accessory_scope_is_explicit(self):
         agent = StoreAgent(DATA, use_llm=False)
         answer = agent.handle("Vocês vendem cabos e palhetas?")

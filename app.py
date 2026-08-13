@@ -800,6 +800,39 @@ class CatalogStore:
         hits = len(keyword_set(query) & keyword_set(product.name))
         return product if hits >= 2 else None
 
+    def brand_products(
+        self,
+        query: str,
+        *,
+        category_id: Optional[int] = None,
+        max_price: Optional[float] = None,
+        include_unavailable: bool = False,
+    ) -> list[Product]:
+        """Return every product matching a brand term, without the normal top-five cap."""
+        query_words = keyword_set(query)
+        brand_terms = {
+            normalize(product.name).split()[0]
+            for product in self.products
+            if normalize(product.name).split()
+        }
+        requested_brands = query_words & brand_terms
+        if not requested_brands:
+            return []
+        matches = []
+        for product in self.products:
+            name_words = normalize(product.name).split()
+            if not name_words or name_words[0] not in requested_brands:
+                continue
+            if category_id is not None and product.category_id != category_id:
+                continue
+            if not include_unavailable and not product.available:
+                continue
+            price = self.effective_price(product) if product.available else product.price_brl
+            if max_price is not None and price > max_price:
+                continue
+            matches.append(product)
+        return sorted(matches, key=lambda item: (self.effective_price(item), normalize(item.name)))
+
     def similar_products(self, product: Product, limit: int = 3) -> list[Product]:
         items = [
             item for item in self.products
@@ -857,13 +890,14 @@ class CatalogStore:
         category_id: Optional[int] = None,
         max_price: Optional[float] = None,
         include_unavailable: bool = False,
+        limit: int = 5,
     ) -> list[RetrievedChunk]:
         products = self.search_products(
             query,
             category_id=category_id,
             max_price=max_price,
             include_unavailable=include_unavailable,
-            limit=5,
+            limit=limit,
         )
         chunks: list[RetrievedChunk] = []
         for product in products:
@@ -944,7 +978,12 @@ dados pessoais além do necessário para responder ao próprio cliente.
         if not message:
             return "Pode me contar como posso ajudar?"
         self._remember_customer(message)
-        intent = route_message(message, self.store)
+        catalog_message = message
+        if re.search(r"\b(?:todos|todas|cada|lista completa|mais modelos)\b", normalize(message)) and self.history:
+            previous_user = next((item["content"] for item in reversed(self.history) if item["role"] == "user"), "")
+            if previous_user and route_message(previous_user, self.store) == "catalog":
+                catalog_message = previous_user + " " + message
+        intent = route_message(catalog_message, self.store)
 
         if intent == "greeting":
             answer = self._greeting()
@@ -953,7 +992,7 @@ dados pessoais além do necessário para responder ao próprio cliente.
             answer = self._out_of_scope()
             grounding = []
         elif intent == "catalog":
-            answer, grounding = self._catalog_answer(message)
+            answer, grounding = self._catalog_answer(catalog_message)
         elif intent == "order":
             answer, grounding = self._order_answer(message)
         elif intent == "policy":
@@ -982,8 +1021,16 @@ dados pessoais além do necessário para responder ao próprio cliente.
         history_block = "\n".join(
             f"{item['role']}: {item['content']}" for item in self.history[-10:]
         ) or "No recent conversation history."
+        list_all_instruction = (
+            "Quando o cliente pedir todos, quais modelos ou a lista completa, enumere "
+            "todos os itens correspondentes presentes no contexto confiável; não reduza a resposta "
+            "ao primeiro resultado nem repita uma resposta anterior."
+            if re.search(r"\b(?:todos|todas|quais|lista completa|mais modelos)\b", normalize(message))
+            else ""
+        )
         system = (
             f"{self.SYSTEM_PROMPT}\n\n"
+            f"{list_all_instruction}\n\n"
             "Trusted context:\n"
             f"{source_block}\n\n"
             "Recent conversation:\n"
@@ -1036,6 +1083,23 @@ dados pessoais além do necessário para responder ao próprio cliente.
         product = self.store.best_product_match(message)
         words = keyword_set(message)
         query_norm = normalize(message)
+
+        brand_products = self.store.brand_products(
+            message, category_id=category_id, max_price=max_price
+        )
+        # Brand/category questions list every matching model, not just best_product_match().
+        if brand_products and not query_model_numbers(message):
+            brand = normalize(brand_products[0].name).split()[0].title()
+            label = self.store.category_name(category_id).lower() if category_id is not None else "produtos"
+            lines = [f"Encontrei {len(brand_products)} {label} da {brand} disponíveis:"]
+            for item in brand_products:
+                promotion = self.store.active_promotion(item)
+                price = format_brl(self.store.effective_price(item))
+                suffix = f" ({promotion.discount_percent:g}% off; era {format_brl(item.price_brl)})" if promotion else ""
+                lines.append(f"- {item.name}: {price}{suffix}; {item.stock_quantity} unidade(s) em estoque.")
+            return "\n".join(lines), self.store.search_grounding(
+                message, category_id=category_id, max_price=max_price, limit=len(brand_products)
+            )
 
         if words & {"promocao", "promocoes", "desconto", "descontos", "oferta", "ofertas", "especial", "especiais", "exclusivo", "exclusiva", "black", "friday"} and product is None and category_id is None and max_price is None:
             promotions = self.store.active_promotions()
@@ -1326,6 +1390,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 
 
 
