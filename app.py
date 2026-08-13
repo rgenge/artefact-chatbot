@@ -73,6 +73,10 @@ QUERY_SYNONYMS: dict[str, set[str]] = {
     "troca": {"devolucao", "return", "exchange"},
     "trocar": {"devolucao", "return", "exchange"},
     "devolucao": {"troca", "return", "exchange"},
+    "deveolucao": {"devolucao", "reembolso"},
+    "parcelado": {"parcelamento", "pagamento", "cartao"},
+    "parcelar": {"parcelamento", "pagamento", "cartao"},
+    "pagar": {"pagamento"},
     "devolver": {"devolucao", "arrependimento"},
     "arrependimento": {"devolucao", "devolver"},
     "garantia": {"defeito", "warranty"},
@@ -249,14 +253,41 @@ def format_brl(value: float) -> str:
 
 
 def parse_budget(message: str) -> Optional[float]:
+    normalized = normalize(message).replace("oate", "ate")
     match = re.search(
-        r"(?:até|ate|menos de|abaixo de|no máximo|no maximo|por até|por ate)"
+        r"(?:ate|menos de|abaixo de|no maximo|por ate)"
         r"\s*(?:r\$)?\s*([\d.]+(?:,[\d]{1,2})?)",
-        message,
+        normalized,
         re.IGNORECASE,
     )
     return parse_number(match.group(1)) if match else None
 
+
+def strip_budget_constraints(message: str) -> str:
+    normalized = normalize(message).replace("oate", "ate")
+    return " ".join(
+        re.sub(
+            r"(?:ate|menos de|abaixo de|no maximo|por ate)"
+            r"\s*(?:r\$)?\s*[\d.]+(?:,[\d]{1,2})?\s*(?:reais?|rs)?",
+            " ",
+            normalized,
+            flags=re.IGNORECASE,
+        ).split()
+    )
+
+
+def merge_catalog_context(
+    previous_query: str,
+    current_message: str,
+    *,
+    replace_budget: bool = False,
+) -> str:
+    base = (
+        strip_budget_constraints(previous_query)
+        if replace_budget
+        else normalize(previous_query)
+    )
+    return " ".join(part for part in (base, normalize(current_message)) if part).strip()
 
 def parse_specs(value: str) -> dict[str, Any]:
     try:
@@ -767,8 +798,29 @@ class CatalogStore:
                         return category_id
                 if category == "Ukuleles":
                     return 9
-        return None
 
+        # Short, common typing errors such as "violã" -> "viola" should
+        # still resolve to the structured category, but only against known
+        # category aliases.
+        tokens = re.findall(r"[a-z0-9]+", normalized)
+        close_alias = next(
+            (
+                candidate
+                for token in tokens
+                for candidate in difflib.get_close_matches(
+                    token, list(CATEGORY_ALIASES), n=1, cutoff=0.82
+                )
+            ),
+            None,
+        )
+        if close_alias is not None:
+            category = CATEGORY_ALIASES[close_alias]
+            for category_id, name in self.categories.items():
+                if normalize(name) == normalize(category):
+                    return category_id
+            if category == "Ukuleles":
+                return 9
+        return None
     def active_promotion(self, product: Product) -> Optional[Promotion]:
         if not product.available:
             return None
@@ -1014,6 +1066,7 @@ dados pessoais além do necessário para responder ao próprio cliente.
         self.last_catalog_offset = 0
         self.last_catalog_label = "produtos"
         self.last_catalog_query = ""
+        self.last_intent: Optional[str] = None
         self.last_selected_product: Optional[Product] = None
         self.checkout_active = False
         self.checkout_product_id: Optional[int] = None
@@ -1042,14 +1095,36 @@ dados pessoais além do necessário para responder ao próprio cliente.
         if not message:
             return "Pode me contar como posso ajudar?"
         self._remember_customer(message)
-        catalog_follow_up = is_catalog_follow_up(message)
-        catalog_message = message
-        previous_user = self.last_catalog_query or next(
+        previous_user = next(
             (item["content"] for item in reversed(self.history) if item["role"] == "user"),
             "",
         )
-        if catalog_follow_up and previous_user and (self.last_catalog_query or route_message(previous_user, self.store) == "catalog"):
-            catalog_message = previous_user + " " + message
+        previous_intent = self.last_intent or (
+            route_message(previous_user, self.store, allow_handoff=self.handoff_enabled)
+            if previous_user
+            else None
+        )
+        catalog_follow_up = is_catalog_follow_up(message)
+        catalog_message = message
+        catalog_history_available = (
+            previous_intent == "catalog" and bool(self.last_catalog_query)
+        )
+        budget_context_follow_up = (
+            catalog_history_available
+            and parse_budget(message) is not None
+            and self.store.category_id_for(message) is None
+        )
+        if catalog_history_available and catalog_follow_up:
+            catalog_message = merge_catalog_context(self.last_catalog_query, message)
+        elif budget_context_follow_up:
+            # "e até 600" inherits "violão" from the last catalog turn and
+            # replaces, rather than combines with, the old budget.
+            catalog_message = merge_catalog_context(
+                self.last_catalog_query,
+                message,
+                replace_budget=True,
+            )
+
         exchange_continuation = self.exchange_active and is_exchange_continuation(message, self.store)
         checkout_continuation = self.checkout_active and is_checkout_continuation(message, self.store)
         intent = (
@@ -1059,6 +1134,13 @@ dados pessoais além do necessário para responder ao próprio cliente.
             if checkout_continuation
             else route_message(catalog_message, self.store, allow_handoff=self.handoff_enabled)
         )
+        if (
+            intent == "unknown"
+            and previous_intent == "policy"
+            and is_contextual_follow_up(message)
+            and parse_budget(message) is None
+        ):
+            intent = "policy"
 
         if intent == "greeting":
             answer = self._greeting()
@@ -1078,7 +1160,7 @@ dados pessoais além do necessário para responder ao próprio cliente.
         elif intent == "catalog":
             answer, grounding = self._catalog_answer(catalog_message)
             brand_switch_follow_up = bool(re.fullmatch(r"e(?: da| do| das| dos| a| o)? [a-z0-9-]+", normalize(message).strip("?!., ")))
-            if not catalog_follow_up or brand_switch_follow_up:
+            if not catalog_follow_up or budget_context_follow_up or brand_switch_follow_up:
                 self.last_catalog_query = catalog_message
         elif intent == "order":
             answer, grounding = self._order_answer(message)
@@ -1095,6 +1177,7 @@ dados pessoais além do necessário para responder ao próprio cliente.
             if generated and self._response_is_grounded(generated, grounding):
                 answer = generated
 
+        self.last_intent = intent
         self.history.append({"role": "user", "content": message})
         self.history.append({"role": "assistant", "content": answer})
         return answer
@@ -1630,8 +1713,15 @@ def is_catalog_follow_up(message: str) -> bool:
     normalized = normalize(message).strip("?!., ")
     return bool(
         re.search(r"\b(?:todos|todas|cada|lista completa|mais modelos?|so tem esses|so esses|tem mais|tem outros|sao todos|sao esses|apenas esses|somente esses|restante|restantes|o que falta|faltam|outros|outras)\b", normalized)
-        or re.search(r"\b(?:quais|qual|que|mostre|mostrar|ver|lista(?:r)?)\s+(?:mais|outros|outras|restantes)\b", normalized)
+        or re.search(r"\b(?:e\s+)?(?:quais|qual|que|mostre|mostrar|ver|lista(?:r)?)\s+(?:mais|outros|outras|restantes)\b", normalized)
         or re.fullmatch(r"e(?: da| do| das| dos| a| o)? [a-z0-9-]+", normalized)
+    )
+
+def is_contextual_follow_up(message: str) -> bool:
+    normalized = normalize(message).strip("?!., ")
+    return bool(
+        re.match(r"^(?:e|mas|tambem)\b", normalized)
+        or normalized in {"como funciona", "qual prazo", "e depois", "e nesse caso"}
     )
 
 def is_checkout_request(message: str) -> bool:

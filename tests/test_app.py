@@ -118,7 +118,7 @@ class StoreAgentTests(unittest.TestCase):
             "Shelby SGD-195E Elétrico Aço Sunburst",
         ):
             self.assertIn(name, answer)
-    def test_small_budget_catalog_shows_every_result(self):
+    def test_budget_catalog_shows_every_result(self):
         agent = StoreAgent(DATA, use_llm=False)
         answer = agent.handle("Quais opções de violões disponíveis custando até R$1000?")
         self.assertIn("Encontrei 12 violões disponíveis até R$ 1.000,00", answer)
@@ -273,6 +273,44 @@ class StoreAgentTests(unittest.TestCase):
         self.assertIn("Sim, esses são todos os 12 violões", answer)
         self.assertNotIn("apenas 12 opções", answer)
 
+    def test_typo_category_and_budget_are_recovered(self):
+        agent = StoreAgent(DATA, use_llm=False)
+        answer = agent.handle("quero violã oaté 900 reais")
+        self.assertIn("Encontrei 11 violões disponíveis até R$ 900,00", answer)
+        self.assertIn("Tagima Woodstock Dreadnought Natural", answer)
+        self.assertNotIn("Pode reformular", answer)
+
+    def test_history_replaces_previous_budget_for_elliptical_catalog_query(self):
+        agent = StoreAgent(DATA, use_llm=False)
+        first = agent.handle("violão até 900 reais")
+        self.assertIn("Encontrei 11 violões disponíveis até R$ 900,00", first)
+
+        low = agent.handle("e violão até 300 reais")
+        self.assertIn("Não encontrei violões disponíveis até R$ 300,00", low)
+
+        middle = agent.handle("e até 600 reais ?")
+        self.assertIn("Encontrei 5 violões disponíveis até R$ 600,00", middle)
+        self.assertIn("Yamaha C40 Nylon Natural", middle)
+        self.assertNotIn("Yamaha F310 Aço Natural", middle)
+        self.assertNotIn("Pode reformular", middle)
+
+    def test_policy_typo_and_payment_follow_up_use_conversation_context(self):
+        agent = StoreAgent(DATA, use_llm=False)
+        return_answer = agent.handle("qual sua politica de deveolução ?")
+        self.assertIn("7 dias corridos", return_answer)
+        self.assertIn("10 dias úteis", return_answer)
+
+        payment = agent.handle("e pra pagar parcelado ?")
+        self.assertIn("12x sem juros", payment)
+        self.assertIn("parcela mínima de R$ 100,00", payment)
+        self.assertNotIn("Pode reformular", payment)
+
+    def test_natural_more_question_uses_previous_catalog_turn(self):
+        agent = StoreAgent(DATA, use_llm=False)
+        agent.handle("Quais violões tem?")
+        answer = agent.handle("e quais mais?")
+        self.assertIn("Sim, há mais violões disponíveis", answer)
+        self.assertNotIn("Pode reformular", answer)
     def test_accessory_scope_is_explicit(self):
         agent = StoreAgent(DATA, use_llm=False)
         answer = agent.handle("Vocês vendem cabos e palhetas?")
