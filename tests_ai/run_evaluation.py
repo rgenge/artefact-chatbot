@@ -149,6 +149,7 @@ def build_conversations(store: CatalogStore, policy_text: str) -> tuple[list[Con
         )
 
     takamine = product_named(store, "Takamine GD20")
+    takamine_gn51ce = product_named(store, "Takamine GN51CE")
     yamaha_category = store.category_id_for("violões")
     yamaha = store.brand_products("Yamaha violões", category_id=yamaha_category)
     yamaha_c40 = product_named(store, "Yamaha C40 Nylon Natural")
@@ -380,6 +381,30 @@ def build_conversations(store: CatalogStore, policy_text: str) -> tuple[list[Con
             ),
         ),
         Conversation(
+            name="exchange follow-up retains policy context",
+            turns=(
+                Turn(
+                    user="Quero saber pra trocar um violão que não gostei",
+                    source="policy",
+                    must_contain=("7 dias corridos", "embalagem original", "recebimento"),
+                    note="The policy route opens an exchange case and asks for the right slots.",
+                ),
+                Turn(
+                    user="Takamine GN51CE, em 12/08",
+                    source="catalog",
+                    must_contain=(
+                        takamine_gn51ce.name,
+                        format_brl(store.effective_price(takamine_gn51ce)),
+                        f"{takamine_gn51ce.stock_quantity} unidade(s)",
+                        "troca por preferência",
+                        "12/08",
+                        "recebimento",
+                        "qual modelo",
+                    ),
+                    note="The follow-up combines deterministic product facts with retrieved exchange guidance.",
+                ),
+            ),
+        ),        Conversation(
             name="policy basics",
             turns=(
                 policy_turn(
