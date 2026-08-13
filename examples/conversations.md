@@ -6,30 +6,31 @@ The agent answers in Brazilian Portuguese because the store is in Campo Grande/M
 
 ## 1. Catálogo com filtro de orçamento e contexto entre turnos
 
-*Covers the brief's catalog scenario. Shows the structured CSV path: an exact budget filter, the real total behind a five-item preview, a brand typo corrected, and follow-ups that keep the category context.*
+*Covers the brief's catalog scenario. Shows the structured CSV path: an exact budget filter shown in full, a broad search paginated with its real total, a brand typo corrected, and follow-ups that keep the category context.*
 
 **Cliente:** Quais opções de violões disponíveis custando até R$1000?
 
 **Agente:** Encontrei 12 violões disponíveis até R$ 1.000,00.
-Mostrando 5 opções; posso listar mais ou filtrar por marca, tipo ou orçamento.
 - Tagima Memphis AC-39 Nylon Natural: R$ 429,90; 15 em estoque.
 - Rozini RC-104 Nylon Estudante: R$ 459,90; 10 em estoque.
 - Shelby SN-100 Folk Aço Preto: R$ 549,00; 5 em estoque.
 - Giannini GF-1R Aço Folk Sunburst: R$ 579,90; 7 em estoque.
 - Yamaha C40 Nylon Natural: R$ 599,90; 12 em estoque.
-
-**Cliente:** Só esses ?
-
-**Agente:** Não. Encontrei 12 violões disponíveis até R$ 1.000,00. A lista anterior mostrava apenas 5 opções; posso filtrar por marca, tipo ou faixa de preço.
-
-**Cliente:** Tem mais?
-
-**Agente:** Sim, há mais violões disponíveis:
 - Giannini GN-15 Nylon Cedr Natural: R$ 689,00; 6 em estoque.
 - Yamaha F310 Aço Natural: R$ 699,90; 14 em estoque.
 - Tagima Dallas Tuner Aço Natural: R$ 749,00; 9 em estoque.
 - Shelby SGD-195E Elétrico Aço Sunburst: R$ 799,00; 6 em estoque.
 - Yamaha C70 Nylon Natural: R$ 849,00; 8 em estoque.
+- Tagima Woodstock Dreadnought Natural: R$ 899,00; 11 em estoque.
+- Tagima TW-7 7 Cordas Aço Natural: R$ 999,00; 6 em estoque.
+
+**Cliente:** Só esses ?
+
+**Agente:** Sim, esses são todos os 12 violões disponíveis até R$ 1.000,00. Posso filtrar por marca, tipo ou faixa de preço.
+
+**Cliente:** Tem mais?
+
+**Agente:** Já mostrei todos os violões disponíveis nesta busca (12 no total).
 
 **Cliente:** E da Tagima ?
 
@@ -60,7 +61,7 @@ Mostrando 5 opções; posso listar mais ou filtrar por marca, tipo ou orçamento
 
 **Cliente:** Tem desconto se eu pagar no PIX?
 
-**Agente:** Sim, para pagamentos via PIX oferecemos 5% de desconto sobre o preço de tabela. Vale lembrar que esse desconto não é cumulativo com eventuais preços promocionais. Posso te ajudar com mais alguma informação sobre esse modelo?
+**Agente:** Sim, temos! Para pagamentos via PIX, oferecemos 5% de desconto sobre o preço de tabela. Posso te ajudar com mais alguma informação sobre este modelo?
 
 **Cliente:** Quais promoções estão ativas?
 
@@ -72,14 +73,14 @@ Mostrando 5 opções; posso listar mais ou filtrar por marca, tipo ou orçamento
 
 **Cliente:** Quais são as formas de pagamento?
 
-**Agente:** Na Empório da Música, aceitamos as seguintes formas de pagamento:
+**Agente:** Aqui na Empório da Música, aceitamos as seguintes formas de pagamento:
 
 *   **PIX:** Pagamento à vista com 5% de desconto.
 *   **Cartão de Débito:** Pagamento à vista (todas as bandeiras).
 *   **Cartão de Crédito:** Em até 12x sem juros (parcela mínima de R$ 100,00).
-*   **Boleto Bancário:** Pagamento à vista com compensação em até 3 dias úteis.
+*   **Boleto Bancário:** Pagamento à vista, com compensação em até 3 dias úteis.
 
-Para parcelamentos de 3x, não há valor mínimo (exceto abaixo de R$ 50,00), de 4x a 6x a parcela mínima é de R$ 80,00, e de 7x a 12x a parcela mínima é de R$ 100,00. Também permitimos a combinação de formas de pagamento para compras acima de R$ 2.000,00. Posso ajudar com mais alguma dúvida?
+Para compras acima de R$ 2.000,00, também permitimos a combinação de formas de pagamento, como PIX e cartão. Precisa de mais algum detalhe sobre essas opções?
 
 ## 3. Informações da loja e políticas do manual
 
@@ -91,25 +92,25 @@ Para parcelamentos de 3x, não há valor mínimo (exceto abaixo de R$ 50,00), de
 
 **Cliente:** Qual o horário de funcionamento?
 
-**Agente:** Nosso atendimento funciona de segunda a sexta-feira, das 09:00 às 18:00, e aos sábados, das 09:00 às 13:00. Aos domingos e feriados, nossa loja permanece fechada. Será um prazer te receber!
+**Agente:** Nosso atendimento funciona de segunda a sexta-feira, das 09:00 às 18:00, e aos sábados, das 09:00 às 13:00. Aos domingos e feriados, nossa loja permanece fechada. Será um prazer receber você!
 
 **Cliente:** Me arrependi da minha compra, posso devolver meu pedido?
 
-**Agente:** Com certeza! Para compras online, você pode solicitar a devolução em até 7 dias corridos após o recebimento, sem precisar de justificativa. O produto deve estar na embalagem original, sem sinais de uso e com todos os manuais e acessórios. 
+**Agente:** Com certeza! Você pode solicitar a devolução do seu pedido online em até 7 dias corridos após o recebimento, sem necessidade de justificativa.
 
-Preciso confirmar com nossa equipe os detalhes do seu pedido para seguirmos com o processo, tudo bem?
+Para isso, o produto deve estar em sua embalagem original, sem sinais de uso e com todos os manuais e acessórios. O frete de devolução é por nossa conta e o reembolso será realizado na mesma forma de pagamento original em até 10 dias úteis. Precisa de ajuda com mais alguma coisa?
 
 **Cliente:** E se o instrumento vier com defeito de fábrica?
 
-**Agente:** Sinto muito por isso! Caso o instrumento apresente defeito de fabricação, você pode solicitar a troca em até 30 dias corridos após a compra. 
+**Agente:** Sinto muito que isso tenha acontecido! Para defeitos de fabricação, você pode solicitar a troca em até 30 dias corridos após a compra.
 
-Preciso confirmar com nossa equipe os detalhes do seu pedido e do ocorrido para te orientar sobre como proceder, tudo bem?
+Após esse período, você deve acionar a garantia diretamente com o fabricante, mas conte conosco para intermediar esse processo, se precisar. Posso te ajudar com mais alguma informação?
 
 **Cliente:** Como funciona o frete para Campo Grande?
 
-**Agente:** Para entregas na região metropolitana de Campo Grande, oferecemos frete grátis em pedidos acima de R$ 500,00. Para compras abaixo desse valor, aplicamos uma taxa fixa de R$ 35,00.
+**Agente:** Para entregas na região metropolitana de Campo Grande, o frete é grátis para pedidos acima de R$ 500,00. Para compras abaixo desse valor, aplicamos uma taxa fixa de R$ 35,00.
 
-Nossas entregas são realizadas por motoboy próprio com um prazo de 1 a 3 dias úteis, e nossa equipe entrará em contato por telefone antes de realizar a entrega.
+Nossas entregas são realizadas por motoboy próprio em um prazo de 1 a 3 dias úteis, e entraremos em contato por telefone antes de realizar a entrega. Posso te ajudar com algo mais?
 
 ## 4. Pedido, privacidade e limites de escopo
 

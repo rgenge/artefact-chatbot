@@ -264,6 +264,15 @@ class StoreAgentTests(unittest.TestCase):
         self.assertIn("Para proteger seus dados", answer)
         self.assertEqual(called, [])
 
+    def test_complete_list_answers_so_esses_with_yes(self):
+        # After a complete answer, "Não ... apenas 12 opções" contradicts itself.
+        agent = StoreAgent(DATA, use_llm=False)
+        first = agent.handle("Quais opções de violões disponíveis custando até R$1000?")
+        self.assertNotIn("Mostrando 5 opções", first)
+        answer = agent.handle("Só esses ?")
+        self.assertIn("Sim, esses são todos os 12 violões", answer)
+        self.assertNotIn("apenas 12 opções", answer)
+
     def test_accessory_scope_is_explicit(self):
         agent = StoreAgent(DATA, use_llm=False)
         answer = agent.handle("Vocês vendem cabos e palhetas?")

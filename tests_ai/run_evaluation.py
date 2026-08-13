@@ -232,29 +232,23 @@ def build_conversations(store: CatalogStore, policy_text: str) -> tuple[list[Con
             ),
         ),
         Conversation(
-            name="budget catalog remaining-results continuation",
+            name="small filtered catalog is shown in full",
             turns=(
                 Turn(
                     user="Quais opções de violões disponíveis custando até R$1000?",
                     source="catalog",
                     must_contain=(
                         f"Encontrei {len(budget_violoes)} violões disponíveis até R$ 1.000,00",
-                        "Mostrando 5 opções",
+                        *(product.name for product in budget_violoes),
                     ),
+                    must_not_contain=("Mostrando 5 opções",),
+                    note="A small price-filtered result set is complete in one deterministic answer.",
                 ),
                 Turn(
-                    user="E o restante? Quais são?",
+                    user="E quais mais?",
                     source="catalog",
-                    must_contain=("Sim, há mais violões disponíveis", budget_violoes[5].name),
-                    must_not_contain=(budget_violoes[0].name,),
-                    note="A natural request for the remainder advances, rather than resets, the structured page.",
-                ),
-                Turn(
-                    user="Quero saber o restante dos violões até 1000 reais",
-                    source="catalog",
-                    must_contain=("Sim, há mais violões disponíveis", budget_violoes[10].name),
-                    must_not_contain=(budget_violoes[5].name,),
-                    note="An explicit restatement of the same category and budget preserves the current offset.",
+                    must_contain=(f"Já mostrei todos os violões disponíveis nesta busca ({len(budget_violoes)} no total).",),
+                    note="The conversation state confirms that the complete filtered set was already shown.",
                 ),
             ),
         ),        Conversation(

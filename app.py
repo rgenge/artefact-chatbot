@@ -1475,6 +1475,14 @@ dados pessoais além do necessário para responder ao próprio cliente.
         if category_id is not None and follow_up and same_context:
             if re.search(r"\b(?:so tem|so esses|sao esses|apenas|somente)\b", normalized_query):
                 shown = min(self.last_catalog_offset or 5, len(all_products))
+                # "Não, havia mais" only makes sense when the list was truncated;
+                # after a complete answer the honest reply is "sim, são todos".
+                if shown >= len(all_products):
+                    return (
+                        f"Sim, esses são todos os {len(all_products)} {label} "
+                        f"disponíveis{budget}. Posso filtrar por marca, tipo ou faixa de preço.",
+                        self.store.grounding_for_products(all_products),
+                    )
                 return (
                     f"Não. Encontrei {len(all_products)} {label} disponíveis{budget}. "
                     f"A lista anterior mostrava apenas {shown} opções; posso filtrar por marca, tipo ou faixa de preço.",
@@ -1493,7 +1501,7 @@ dados pessoais além do necessário para responder ao próprio cliente.
                             price_text += f" ({promotion.discount_percent:g}% off; era {format_brl(item.price_brl)})"
                         lines.append(f"- {item.name}: {price_text}; {item.stock_quantity} em estoque.")
                     return "\n".join(lines), self.store.grounding_for_products(page)
-                return f"Já mostrei todas as {label} disponíveis nesta busca ({len(all_products)} no total).", self.store.grounding_for_products(all_products)
+                return f"Já mostrei todos os {label} disponíveis nesta busca ({len(all_products)} no total).", self.store.grounding_for_products(all_products)
 
         if category_id is not None:
             self.last_selected_product = None
