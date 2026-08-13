@@ -25,7 +25,7 @@ bash ./run.sh
 Expected result:
 
 ~~~text
-Ran 34 tests ... OK
+Ran 38 tests ... OK
 Evaluated 42 turns: 42 passed, 0 failed, 0 warnings.
 ~~~
 

@@ -131,6 +131,43 @@ class StoreAgentTests(unittest.TestCase):
         self.assertIn("Encontrei 6 violões da Tagima", answer)
         self.assertIn("Tagima Vegas Elétrico Aço Natural", answer)
 
+    def test_ready_delivery_query_uses_structured_catalog_availability(self):
+        agent = StoreAgent(DATA, use_llm=False)
+        answer = agent.handle("Tem violão pronta entrega?")
+
+        self.assertIn("Encontrei 33 violões disponíveis", answer)
+        self.assertIn("Yamaha C40 Nylon Natural", answer)
+        self.assertNotIn("frete é grátis", answer)
+
+    def test_standalone_brand_and_typo_use_catalog_retrieval(self):
+        for query in ("Takamine", "Yakamine"):
+            with self.subTest(query=query):
+                agent = StoreAgent(DATA, use_llm=False)
+                answer = agent.handle(query)
+
+                self.assertIn("Encontrei 4 violões da Takamine", answer)
+                self.assertIn("Takamine GN51CE Elétrico Aço Natural", answer)
+                self.assertNotIn("Pode reformular", answer)
+
+    def test_brand_switch_replaces_previous_brand_filter(self):
+        agent = StoreAgent(DATA, use_llm=False)
+        agent.handle("Quero um violão Takamine")
+        answer = agent.handle("E Yamaha?")
+
+        self.assertIn("Encontrei 7 violões da Yamaha", answer)
+        self.assertIn("Yamaha NTX1 Elétrico Nylon Natural", answer)
+        self.assertNotIn("Takamine GD20 Dreadnought Natural", answer)
+
+    def test_category_switch_replaces_previous_catalog_filters(self):
+        agent = StoreAgent(DATA, use_llm=False)
+        agent.handle("Quero um violão Takamine")
+        answer = agent.handle("E baterias?")
+
+        self.assertIn("Encontrei 3 baterias e percussão disponíveis", answer)
+        self.assertIn("Bateria Acústica Yamaha Kit 1 Studio", answer)
+        self.assertIn("Bateria Acústica Pearl Kit 2 Studio", answer)
+        self.assertIn("Bateria Acústica Yamaha Kit 3 Studio", answer)
+        self.assertNotIn("da Bateria", answer)
     def test_unknown_question_does_not_invent_personal_life(self):
         agent = StoreAgent(DATA, use_llm=False)
         answer = agent.handle("O que tu faz no final de semana?")

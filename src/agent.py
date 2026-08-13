@@ -138,12 +138,38 @@ dados pessoais além do necessário para responder ao próprio cliente.
         catalog_history_available = (
             previous_intent == "catalog" and bool(self.last_catalog_query)
         )
+        previous_category_id = (
+            self.store.category_id_for(self.last_catalog_query)
+            if catalog_history_available
+            else None
+        )
+        current_category_id = self.store.category_id_for(message)
+        category_switch_follow_up = (
+            catalog_history_available
+            and current_category_id is not None
+            and current_category_id != previous_category_id
+        )
+        brand_switch_follow_up = (
+            catalog_history_available and is_brand_follow_up(message, self.store)
+        )
         budget_context_follow_up = (
             catalog_history_available
             and parse_budget(message) is not None
-            and self.store.category_id_for(message) is None
+            and current_category_id is None
         )
-        if catalog_history_available and catalog_follow_up:
+        if category_switch_follow_up:
+            # "E baterias?" starts a new category search; retaining the previous
+            # guitar/brand query would make the filters conflict.
+            catalog_message = message
+        elif brand_switch_follow_up:
+            # "E Yamaha?" replaces the previous brand but retains the prior
+            # category, so it means "Yamaha violões", not "Takamine + Yamaha".
+            catalog_message = (
+                f"{self.store.category_name(previous_category_id)} {message}"
+                if previous_category_id is not None
+                else message
+            )
+        elif catalog_history_available and catalog_follow_up:
             catalog_message = merge_catalog_context(self.last_catalog_query, message)
         elif budget_context_follow_up:
             # "e até 600" inherits "violão" from the last catalog turn and
@@ -188,8 +214,12 @@ dados pessoais além do necessário para responder ao próprio cliente.
             answer, grounding = self._exchange_answer(message)
         elif intent == "catalog":
             answer, grounding = self._catalog_answer(catalog_message)
-            brand_switch_follow_up = bool(re.fullmatch(r"e(?: da| do| das| dos| a| o)? [a-z0-9-]+", normalize(message).strip("?!., ")))
-            if not catalog_follow_up or budget_context_follow_up or brand_switch_follow_up:
+            if (
+                not catalog_follow_up
+                or budget_context_follow_up
+                or brand_switch_follow_up
+                or category_switch_follow_up
+            ):
                 self.last_catalog_query = catalog_message
         elif intent == "order":
             answer, grounding = self._order_answer(message)
@@ -488,11 +518,31 @@ dados pessoais além do necessário para responder ao próprio cliente.
         brand_products = self.store.brand_products(
             message, category_id=category_id, max_price=max_price
         )
+        if category_id is not None and brand_products:
+            # Some catalog rows start with a category word (for example,
+            # "Bateria Acústica..."). A category-only query must not turn that
+            # word into a fictitious brand filter.
+            category_words = keyword_set(self.store.category_name(category_id))
+            matched_brand_words = {
+                normalize(item.name).split()[0]
+                for item in brand_products
+                if normalize(item.name).split()
+            }
+            if not (words & (matched_brand_words - category_words)):
+                brand_products = []
+
         # Brand/category questions list every matching model, not just best_product_match().
         if brand_products and product is None and not query_model_numbers(message):
             self.last_selected_product = None
             brand = normalize(brand_products[0].name).split()[0].title()
-            label = self.store.category_name(category_id).lower() if category_id is not None else "produtos"
+            category_ids = {item.category_id for item in brand_products}
+            label = (
+                self.store.category_name(category_id).lower()
+                if category_id is not None
+                else self.store.category_name(category_ids.pop()).lower()
+                if len(category_ids) == 1
+                else "produtos"
+            )
             self.last_catalog_products = brand_products
             self.last_catalog_offset = len(brand_products)
             self.last_catalog_label = label
@@ -747,6 +797,16 @@ def is_catalog_follow_up(message: str) -> bool:
         or re.fullmatch(r"e(?: da| do| das| dos| a| o)? [a-z0-9-]+", normalized)
     )
 
+def is_brand_follow_up(message: str, store: CatalogStore) -> bool:
+    """Whether a short 'E <marca>?' turn replaces the previous brand filter."""
+
+    normalized = normalize(message).strip("?!., ")
+    return bool(
+        re.fullmatch(r"e(?: da| do| das| dos| a| o)? [a-z0-9-]+", normalized)
+        and store.brand_products(normalized)
+    )
+
+
 def is_contextual_follow_up(message: str) -> bool:
     normalized = normalize(message).strip("?!., ")
     return bool(
@@ -924,6 +984,15 @@ def route_message(message: str, store: CatalogStore, *, allow_handoff: bool = Tr
     order_signal = bool(
         words & {"pedido", "pedidos", "ordem", "compra", "rastrear", "rastreamento", "tracking", "status", "despachado"}
     )
+    category_id = store.category_id_for(message)
+    product = store.best_product_match(message)
+    brand_matches = store.brand_products(message)
+    availability_signal = bool(
+        words & {
+            "estoque", "disponivel", "disponibilidade", "pronta", "pronto",
+            "imediata", "imediato",
+        }
+    )
     policy_signal = bool(
         is_exchange_request(message)
         or words & {
@@ -939,6 +1008,10 @@ def route_message(message: str, store: CatalogStore, *, allow_handoff: bool = Tr
         or extract_order_reference(message) is not None
     ):
         return "order"
+    # "Tem violão pronta entrega?" is an inventory question. It must not be
+    # diverted to the delivery-policy route just because it contains "entrega".
+    if availability_signal and (category_id is not None or product is not None or brand_matches):
+        return "catalog"
     if policy_signal:
         return "policy"
 
@@ -949,7 +1022,7 @@ def route_message(message: str, store: CatalogStore, *, allow_handoff: bool = Tr
             "descontos", "oferta", "ofertas", "especial", "especiais", "exclusivo", "exclusiva", "black", "friday", "tem",
         }
     )
-    if store.category_id_for(message) is not None or store.best_product_match(message) is not None or catalog_signal:
+    if category_id is not None or product is not None or brand_matches or catalog_signal:
         return "catalog"
     if order_signal:
         return "order"
