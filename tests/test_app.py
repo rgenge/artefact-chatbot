@@ -5,7 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from app import StoreAgent
+from app import StoreAgent, extract_delivery_address, extract_quantity
 
 
 DATA = ROOT / "data"
@@ -122,6 +122,77 @@ class StoreAgentTests(unittest.TestCase):
         self.assertIn("novembro", answer)
         self.assertIn("15% a 30%", answer)
         self.assertIn("não há uma promoção ativa identificada como Black Friday", answer)
+
+    def test_checkout_flow_preserves_product_and_address(self):
+        agent = StoreAgent(DATA, use_llm=False)
+        policy_queries = []
+        agent.rag.search = lambda query: policy_queries.append(query) or []
+
+        agent.handle("Quais violões estão disponíveis até R$ 2.000?")
+        start = agent.handle("Quero finalizar a compra")
+        self.assertIn("qual modelo", start.lower())
+        self.assertNotIn("proteger seus dados", start.lower())
+
+        selected = agent.handle("amaha C40 Nylon Natural:")
+        self.assertIn("Yamaha C40 Nylon Natural", selected)
+        self.assertIn("R$ 599,90", selected)
+
+        confirmed = agent.handle("Sim isso .")
+        self.assertIn("Yamaha C40 Nylon Natural", confirmed)
+        self.assertIn("nome completo", confirmed)
+
+        address = agent.handle("Rua teste, 112, campo grande,")
+        self.assertIn("Rua teste, 112, campo grande", address)
+        self.assertIn("telefone ou e-mail", address)
+        self.assertIn("pedido ainda não foi criado", address)
+        self.assertTrue(policy_queries)
+
+    def test_checkout_does_not_load_customer_or_order_tables(self):
+        agent = StoreAgent(DATA, use_llm=False)
+        agent.handle("Quero finalizar a compra")
+        self.assertIsNone(agent.store._customers_cache)
+        self.assertIsNone(agent.store._orders_cache)
+        self.assertIsNone(agent.store._order_items_cache)
+    def test_checkout_reads_the_quantity_it_asked_for(self):
+        agent = StoreAgent(DATA, use_llm=False)
+        agent.handle("Quero comprar o Yamaha C40")
+        answer = agent.handle("Quero 3 unidades")
+        self.assertEqual(agent.checkout_quantity, 3)
+        self.assertIn("3x Yamaha C40 Nylon Natural", answer)
+        self.assertNotIn("reformular", answer)
+
+    def test_checkout_caps_quantity_at_available_stock(self):
+        agent = StoreAgent(DATA, use_llm=False)
+        agent.handle("Quero comprar o Yamaha CG162S")
+        answer = agent.handle("quero 50 unidades")
+        self.assertIn("4 unidade(s) em estoque", answer)
+        self.assertIn("posso seguir com 4", answer)
+
+    def test_checkout_confirms_an_inferred_product_before_selecting_it(self):
+        agent = StoreAgent(DATA, use_llm=False)
+        agent.handle("Quanto custa o Takamine GD20?")
+        asked = agent.handle("Quero finalizar a compra")
+        self.assertIn("Você quer esse modelo?", asked)
+        confirmed = agent.handle("Sim")
+        self.assertIn("Perfeito! Selecionei", confirmed)
+        self.assertIn("Takamine GD20", confirmed)
+
+    def test_address_extraction_keeps_only_the_address(self):
+        self.assertEqual(
+            extract_delivery_address("Pode entregar na Rua das Flores, 250, por favor obrigado"),
+            "Rua das Flores, 250",
+        )
+        self.assertEqual(
+            extract_delivery_address("meu endereço é Avenida Afonso Pena 1500 e quero pagar no pix"),
+            "Avenida Afonso Pena 1500",
+        )
+        self.assertIsNone(extract_delivery_address("Quais violões tem?"))
+
+    def test_quantity_extraction_ignores_budgets_and_model_numbers(self):
+        self.assertEqual(extract_quantity("Quero 3 unidades"), 3)
+        self.assertEqual(extract_quantity("duas unidades"), 2)
+        self.assertIsNone(extract_quantity("Quais violões até 1000?"))
+        self.assertIsNone(extract_quantity("Quanto custa o Takamine GD20?"))
 
     def test_accessory_scope_is_explicit(self):
         agent = StoreAgent(DATA, use_llm=False)

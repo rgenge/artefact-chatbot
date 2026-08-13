@@ -143,9 +143,9 @@ STATUS_LABELS = {
     "cancelled": "cancelado",
 }
 
-# Situações que o agente não resolve sozinho e que devem ir para um atendente.
-# Deliberadamente estreito: "reclamação" genérica continua sendo resposta de
-# política, só escala quando há atraso, avaria ou pedido explícito de humano.
+# Situations the agent cannot settle on its own, which belong to a human agent.
+# Deliberately narrow: a generic "reclamação" stays a policy answer; only a late
+# delivery, damaged goods or an explicit request for a person escalates.
 HANDOFF_PATTERNS = (
     r"\batras(?:ad[oa]s?|o|os|ou|ando)\b",
     r"\bnao (?:chegou|chegaram|recebi|veio|vieram|entregaram|foi entregue)\b",
@@ -155,8 +155,15 @@ HANDOFF_PATTERNS = (
     r"\bprocon\b",
 )
 
-# Versão legível de HANDOFF_PATTERNS, exibida na interface web. Mantenha as duas
-# listas alinhadas: é o que o cliente lê para saber o que aciona um atendente.
+# Buying is a different flow from an order lookup: it creates no order and loads
+# no customers/order_items. It keeps the chosen product and collects hand-off data.
+CHECKOUT_PATTERNS = (
+    r"\b(?:finalizar|concluir|fechar|prosseguir)\b.*\b(?:compra|pedido)\b",
+    r"\b(?:quero|gostaria de|posso)\s+(?:comprar|adquirir|levar)\b",
+)
+
+# Readable version of HANDOFF_PATTERNS, rendered by the web UI. Keep both lists
+# aligned: this is what the customer reads to know what reaches a human.
 HANDOFF_TRIGGER_LABELS = (
     ("Pedido atrasado", "meu violão está atrasado"),
     ("Pedido não entregue", "o pedido não chegou"),
@@ -992,22 +999,28 @@ dados pessoais além do necessário para responder ao próprio cliente.
         self.customer_id = customer_id
         self.history: list[dict[str, str]] = []
         self.use_llm = use_llm
-        # Controlado pelo cliente na interface web; desligado, o agente responde
-        # normalmente em vez de escalar.
+        # Toggled by the customer in the web UI; when off, the agent answers
+        # normally instead of escalating.
         self.handoff_enabled = handoff_enabled
         self.pending_handoffs: list[dict[str, Any]] = []
         self.last_catalog_products: list[Product] = []
         self.last_catalog_offset = 0
         self.last_catalog_label = "produtos"
         self.last_catalog_query = ""
+        self.last_selected_product: Optional[Product] = None
+        self.checkout_active = False
+        self.checkout_product_id: Optional[int] = None
+        self.checkout_address: Optional[str] = None
+        self.checkout_quantity = 1
+        self.checkout_confirmed = False
 
     @property
     def customer(self) -> Optional[Customer]:
         return self.store.customers_by_id.get(self.customer_id) if self.customer_id else None
 
     def _remember_customer(self, message: str) -> None:
-        # Identity lookup is opt-in; catalog/promotion questions do not load customers.
-        if self.customer_id is not None:
+        # Identity lookup is opt-in; catalog/promotion/checkout questions do not load customers.
+        if self.customer_id is not None or self.checkout_active:
             return
         if not re.search(r"@|\+?\d[\d ()-]{7,}|\b(?:sou|meu nome|meu email)\b", message, re.IGNORECASE):
             return
@@ -1027,7 +1040,12 @@ dados pessoais além do necessário para responder ao próprio cliente.
         )
         if catalog_follow_up and previous_user and (self.last_catalog_query or route_message(previous_user, self.store) == "catalog"):
             catalog_message = previous_user + " " + message
-        intent = route_message(catalog_message, self.store, allow_handoff=self.handoff_enabled)
+        checkout_continuation = self.checkout_active and is_checkout_continuation(message, self.store)
+        intent = (
+            "checkout"
+            if checkout_continuation
+            else route_message(catalog_message, self.store, allow_handoff=self.handoff_enabled)
+        )
 
         if intent == "greeting":
             answer = self._greeting()
@@ -1037,6 +1055,8 @@ dados pessoais além do necessário para responder ao próprio cliente.
             grounding = []
         elif intent == "handoff":
             answer, grounding = self._handoff_answer(message)
+        elif intent == "checkout":
+            answer, grounding = self._checkout_answer(message)
         elif intent == "catalog":
             answer, grounding = self._catalog_answer(catalog_message)
             brand_switch_follow_up = bool(re.fullmatch(r"e(?: da| do| das| dos| a| o)? [a-z0-9-]+", normalize(message).strip("?!., ")))
@@ -1140,12 +1160,93 @@ dados pessoais além do necessário para responder ao próprio cliente.
             "da loja. Pode reformular a dúvida?"
         )
 
-    def _handoff_answer(self, message: str) -> tuple[str, list[RetrievedChunk]]:
-        """Monta o pedido de transferência para um atendente humano.
+    def _checkout_answer(self, message: str) -> tuple[str, list[RetrievedChunk]]:
+        """Keep checkout conversational without pretending an order was created.
 
-        NÃO FINALIZADO: o envio real (fila de atendimento, CRM, WhatsApp da
-        loja) ainda não existe. Por enquanto o chamado só é acumulado em
-        self.pending_handoffs e o cliente recebe a confirmação em texto.
+        Catalog facts come from the structured product index. Payment and delivery
+        guidance comes from local PDF RAG; customer/order tables are not needed.
+        """
+        self.checkout_active = True
+        policy_chunks = self.rag.search(
+            "finalizar compra formas de pagamento entrega endereço"
+        )
+        # Naming a product now counts as choosing it; otherwise fall back to what
+        # was already chosen, then to the single product the customer just viewed.
+        named = self.store.best_product_match(message)
+        product = named
+        if named is not None and named.available:
+            self.checkout_product_id = named.product_id
+        elif named is None:
+            if self.checkout_product_id is not None:
+                product = self.store.products_by_id.get(self.checkout_product_id)
+            elif self.last_selected_product is not None:
+                product = self.last_selected_product
+                self.checkout_product_id = product.product_id
+
+        address = extract_delivery_address(message)
+        if address:
+            self.checkout_address = address
+        quantity = extract_quantity(message)
+        if quantity is not None:
+            self.checkout_quantity = quantity
+
+        grounding = (
+            self.store.grounding_for_products([product]) if product is not None else []
+        )
+        grounding.extend(policy_chunks)
+
+        if product is None:
+            return (
+                "Claro! Para iniciar a compra, me diga qual modelo você quer adquirir. "
+                "Como a lista anterior tinha várias opções, não vou escolher automaticamente "
+                "o primeiro item. Você pode enviar o nome ou modelo, por exemplo: Yamaha C40.",
+                grounding,
+            )
+        if not product.available:
+            return (
+                f"O {product.name} está temporariamente indisponível e não pode ser incluído "
+                "na compra agora. Posso procurar uma alternativa em estoque.",
+                grounding,
+            )
+
+        price = format_brl(self.store.effective_price(product))
+        item = f"{self.checkout_quantity}x {product.name} ({price})"
+        if address:
+            return (
+                f"Recebi o endereço de entrega: {self.checkout_address}. "
+                f"Para encaminhar a compra de {item}, faltam seu nome completo, telefone ou e-mail "
+                "e a forma de pagamento (PIX, débito, cartão ou boleto). O pedido ainda não foi criado; "
+                "ele só será registrado após essa confirmação.",
+                grounding,
+            )
+        # Chosen explicitly (named or confirmed) versus merely inferred from the
+        # previous turn, which still has to be checked with the customer.
+        if named is not None or is_checkout_confirmation(message) or self.checkout_confirmed:
+            self.checkout_confirmed = True
+            shortage = (
+                f" Temos {product.stock_quantity} unidade(s) em estoque, então posso seguir "
+                f"com {product.stock_quantity} ou buscar outro modelo."
+                if self.checkout_quantity > product.stock_quantity
+                else f" Temos {product.stock_quantity} unidade(s) disponíveis."
+            )
+            return (
+                f"Perfeito! Selecionei {item}.{shortage} "
+                "Para concluir, envie seu nome completo, telefone ou e-mail "
+                "e o endereço de entrega. Depois confirmamos a forma de pagamento e registramos o pedido.",
+                grounding,
+            )
+        return (
+            f"Encontrei {item}; temos {product.stock_quantity} unidade(s) disponíveis. "
+            "Você quer esse modelo? Se sim, confirme a quantidade e envie nome completo, "
+            "telefone ou e-mail e endereço de entrega.",
+            grounding,
+        )
+    def _handoff_answer(self, message: str) -> tuple[str, list[RetrievedChunk]]:
+        """Build the transfer request for a human agent.
+
+        NOT FINISHED: the real dispatch (support queue, CRM, the store's
+        WhatsApp) does not exist yet. For now the ticket is only collected in
+        self.pending_handoffs and the customer gets the confirmation in text.
         """
         customer = self.customer
         order = self.store.latest_order(self.customer_id) if self.customer_id else None
@@ -1158,7 +1259,7 @@ dados pessoais além do necessário para responder ao próprio cliente.
             "history": list(self.history[-6:]),
         }
         self.pending_handoffs.append(ticket)
-        # TODO: despachar o ticket para a fila humana e devolver o protocolo real.
+        # TODO: dispatch the ticket to the human queue and return the real protocol.
 
         answer = (
             f"Sinto muito pelo transtorno. Já estou acionando um atendente da equipe "
@@ -1186,6 +1287,7 @@ dados pessoais além do necessário para responder ao próprio cliente.
         )
         # Brand/category questions list every matching model, not just best_product_match().
         if brand_products and product is None and not query_model_numbers(message):
+            self.last_selected_product = None
             brand = normalize(brand_products[0].name).split()[0].title()
             label = self.store.category_name(category_id).lower() if category_id is not None else "produtos"
             self.last_catalog_products = brand_products
@@ -1233,6 +1335,7 @@ dados pessoais além do necessário para responder ao próprio cliente.
             normalize(product.name) in query_norm
             or len(keyword_set(message) & keyword_set(product.name)) >= 2
         ):
+            self.last_selected_product = product
             promotion = self.store.active_promotion(product)
             if not product.available:
                 state = "descontinuado" if product.status == "discontinued" else "temporariamente indisponível"
@@ -1302,6 +1405,7 @@ dados pessoais além do necessário para responder ao próprio cliente.
                 return f"Já mostrei todas as {label} disponíveis nesta busca ({len(all_products)} no total).", self.store.grounding_for_products(all_products)
 
         if category_id is not None:
+            self.last_selected_product = None
             products = all_products[:5]
             self.last_catalog_products = all_products
             self.last_catalog_offset = len(products)
@@ -1417,6 +1521,88 @@ def is_catalog_follow_up(message: str) -> bool:
         or re.fullmatch(r"e(?: da| do| das| dos| a| o)? [a-z0-9-]+", normalized)
     )
 
+def is_checkout_request(message: str) -> bool:
+    normalized = normalize(message)
+    return any(re.search(pattern, normalized) for pattern in CHECKOUT_PATTERNS)
+
+
+def is_checkout_confirmation(message: str) -> bool:
+    normalized = normalize(message).strip("?!., ")
+    return bool(
+        re.fullmatch(
+            r"(?:sim|sim isso|isso|esse|essa|pode ser|e esse|e essa|é esse|e esse mesmo|confirmo|confirmado)",
+            normalized,
+        )
+    )
+
+
+def extract_delivery_address(message: str) -> Optional[str]:
+    """Recognize a street address without interpreting it as a product query.
+
+    Returns only the address span: the customer usually wraps it in politeness
+    or a payment note, and echoing the whole sentence back reads as a mistake.
+    """
+    match = re.search(
+        r"\b(?:rua|avenida|av|alameda|travessa|estrada|rodovia|pra[cç]a)\b.*",
+        message,
+        re.IGNORECASE,
+    )
+    if not match or not re.search(r"\d{1,6}", match.group(0)):
+        return None
+    address = re.split(
+        r",?\s+(?:e\s+(?:quero|queria|vou|posso|pago)|por favor|obrigad[oa]|"
+        r"pode\s+(?:enviar|entregar|mandar)|pagamento|pago)\b",
+        match.group(0),
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    return " ".join(address.strip(" ,.;").split()) or None
+
+
+# Spelled-out counts customers actually use; digits cover the rest.
+QUANTITY_WORDS = {
+    "um": 1, "uma": 1, "dois": 2, "duas": 2, "tres": 3, "quatro": 4,
+    "cinco": 5, "seis": 6, "sete": 7, "oito": 8, "nove": 9, "dez": 10,
+}
+
+
+def extract_quantity(message: str) -> Optional[int]:
+    """Read a checkout quantity, only with an explicit unit or a buying verb.
+
+    Kept strict on purpose: a bare number in "até 1000" is a budget, not a count.
+    """
+    normalized = normalize(message)
+    match = re.search(
+        r"\b(\d{1,3})\s*(?:unidade|unidades|peca|pecas|item|itens|x)\b", normalized
+    ) or re.search(
+        r"\b(?:quero|queria|vou levar|leva|manda|coloca|seriam|sao|quantidade)\s+(\d{1,3})\b",
+        normalized,
+    )
+    if match:
+        value = int(match.group(1))
+        return value if 1 <= value <= 99 else None
+    words = "|".join(QUANTITY_WORDS)
+    match = re.search(rf"\b({words})\s+(?:unidade|unidades|peca|pecas|item|itens)\b", normalized)
+    return QUANTITY_WORDS[match.group(1)] if match else None
+
+
+def is_checkout_continuation(message: str, store: CatalogStore) -> bool:
+    normalized = normalize(message)
+    if extract_delivery_address(message) or is_checkout_confirmation(message):
+        return True
+    # The agent asks for a quantity, so the answer to it must stay in checkout.
+    if extract_quantity(message) is not None:
+        return True
+    if re.search(r"@|\+?\d[\d ()-]{7,}", message):
+        return True
+    product = store.best_product_match(message)
+    if product is not None and not re.search(
+        r"\b(?:quais|qual|preco|custa|valor|estoque|disponivel|tem|opcoes)\b",
+        normalized,
+    ):
+        return True
+    return False
+
 def needs_human_handoff(message: str) -> bool:
     normalized = normalize(message)
     return any(re.search(pattern, normalized) for pattern in HANDOFF_PATTERNS)
@@ -1440,8 +1626,8 @@ def route_message(message: str, store: CatalogStore, *, allow_handoff: bool = Tr
         return "greeting"
     if is_injection(message):
         return "out_of_scope"
-    # Escalação vem antes do catálogo: "meu violão está atrasado" cita um
-    # produto, mas é um caso de atendimento humano, não uma busca.
+    # Escalation comes before catalog: "meu violão está atrasado" names a
+    # product, but it is a support case, not a search.
     if allow_handoff and needs_human_handoff(message):
         return "handoff"
 
@@ -1454,6 +1640,8 @@ def route_message(message: str, store: CatalogStore, *, allow_handoff: bool = Tr
     )
     if accessory_only:
         return "out_of_scope"
+    if is_checkout_request(message):
+        return "checkout"
 
     order_signal = bool(
         words & {"pedido", "pedidos", "ordem", "compra", "rastrear", "rastreamento", "tracking", "status", "despachado"}
