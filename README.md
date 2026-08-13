@@ -1,15 +1,24 @@
-# Empório da Música — agente Gemini
+# Empório da Música — Gemini agent
 
-Protótipo Python do agente de atendimento pedido no desafio. A arquitetura segue o processo do TwinTweaker:
+Python prototype of the customer-service agent asked for in the challenge. The
+architecture follows the TwinTweaker process:
 
-1. O catálogo, promoções e pedidos são consultados de forma estruturada nos CSVs.
-2. O manual em PDF é dividido em chunks de 1.400 caracteres com overlap de 180.
-3. O PDF usa recuperação híbrida: keywords/ranking determinístico + embeddings Gemini (gemini-embedding-001, 768 dimensões).
-4. O contexto recuperado é enviado ao gemini-3.1-flash para escrever respostas abertas curtas e acolhedoras.
-5. Listas estruturadas de catálogo permanecem determinísticas: o modelo não pode resumir, truncar ou inventar linhas de preço/estoque.
-6. Sem chave ou com falha de rede, o fallback local continua funcionando sem inventar preço ou estoque.
+1. Catalog, promotions and orders are queried structurally from the CSVs.
+2. The PDF manual is split into 1,400-character chunks with 180 of overlap.
+3. The PDF uses hybrid retrieval: deterministic keyword ranking + Gemini
+   embeddings (`gemini-embedding-001`, 768 dimensions).
+4. The retrieved context goes to `gemini-3.1-flash`, which writes short, warm
+   open-ended answers.
+5. Structured catalog lists stay deterministic: the model may not summarise,
+   truncate or invent price/stock rows.
+6. With no key or on a network failure, the local fallback keeps working without
+   inventing price or stock.
 
-## Configuração
+The agent replies to customers in Brazilian Portuguese — the store is in Campo
+Grande/MS and that is its persona. This documentation is in English, as required
+for the submission.
+
+## Setup
 
 ~~~bash
 python -m venv .venv
@@ -19,71 +28,123 @@ pip install -r requirements.txt
 copy .env.example .env
 ~~~
 
-Preencha no .env:
+Fill in `.env`:
 
 ~~~env
-GOOGLE_GENERATIVE_AI_API_KEY=seu_token
+GOOGLE_GENERATIVE_AI_API_KEY=your_token
 GEMINI_MODEL=gemini-3.1-flash
 GEMINI_EMBEDDING_MODEL=gemini-embedding-001
 GEMINI_EMBEDDING_DIMENSIONS=768
 ~~~
 
-A chave não fica no código. O .env já está no .gitignore.
+The key never lives in the code. `.env` is already in `.gitignore`.
 
-## Uso
+## Usage
 
-Com Gemini ativado:
+With Gemini enabled:
 
 ~~~bash
 python app.py
 ~~~
 
-Consulta direta:
+Single query:
 
 ~~~bash
 python app.py --message "Quanto custa o Takamine GD20?"
 ~~~
 
-Consulta de pedido com identificação:
+Order lookup with identification:
 
 ~~~bash
 python app.py --customer-id 2 --message "Qual o status do pedido 8?"
 ~~~
 
-Modo offline, sem chamadas externas:
+Browser UI at `http://127.0.0.1:8000`:
+
+~~~bash
+python app.py --web
+~~~
+
+Offline mode, no external calls:
 
 ~~~bash
 python app.py --no-llm
 python -m unittest discover -s tests -v
 ~~~
 
-Avaliação de conversas reais, offline e reproduzível:
+Reproducible offline evaluation of real conversations:
 
 ~~~bash
 python tests_ai/run_evaluation.py
 ~~~
 
-O relatório é salvo em `tests_ai/report.md` e o resultado detalhado em `tests_ai/results.json`.
+The report is written to `tests_ai/report.md` and the detailed result to
+`tests_ai/results.json`.
 
-## Decisão técnica
+## Architecture
 
-O catálogo não é tratado como texto RAG: preço, estoque, status, promoção e itens de pedido precisam de filtros e joins exatos. Essa é a mesma separação do TwinTweaker para dados tabulares. O agente corrige typos comuns de marca, informa o total quando mostra uma prévia de cinco itens e mantém contexto em perguntas como “só esses?” e “E da Tagima?”.
+The flow separates two sources of truth.
 
-O PDF segue RAG híbrido. Keywords preservam termos exatos, códigos e regras; embeddings recuperam perguntas semanticamente parecidas. Consultas de preço/modelo/política priorizam a evidência lexical, enquanto perguntas narrativas podem usar similaridade semântica. O Gemini só redige a resposta sobre o contexto recuperado; um guard determinístico rejeita respostas que introduzam valores monetários ausentes do contexto.
+**Catalog — structured, never RAG.** Products, categories, promotions,
+customers and orders are loaded from the CSVs and queried with filters,
+normalisation and deterministic joins. Price, stock, discount and order status
+are never guessed by semantic similarity. The agent corrects common brand typos,
+reports the total when it shows a five-item preview, and keeps context across
+follow-ups like "só esses?" and "E da Tagima?".
 
-O histórico recente é reenviado ao Gemini como turnos user/model. O prompt limita escopo, tom, idioma, tamanho e proíbe inventar dados. Pedidos de acessórios são redirecionados conforme o manual.
+**Policy manual — hybrid RAG.** Keywords preserve exact terms, codes and rules;
+embeddings retrieve semantically similar phrasings. Price/model/policy questions
+prioritise lexical evidence, while narrative questions may lean on semantic
+similarity. Gemini only writes over the retrieved context, and a deterministic
+guard rejects answers that introduce monetary values absent from that context.
 
-Veja [examples/conversations.md](examples/conversations.md) para os cenários exigidos.
+**Prompt and history.** Recent history is replayed to Gemini as user/model
+turns. The prompt constrains scope, tone, language and length, and forbids
+inventing data. Accessory requests are redirected per the manual.
 
-## Limitações
+**Human handoff.** A narrow set of deterministic triggers — late delivery,
+non-delivery, damage on arrival, an explicit request for a person, a mention of
+Procon — routes the message to a handoff instead of an answer. The web UI shows
+the trigger list and lets the customer switch escalation off.
 
-A base é um snapshot local e não há autenticação real de cliente. O índice de embeddings é reconstruído ao iniciar o processo, em vez de persistir em pgvector/Supabase como no TwinTweaker. Em produção eu persistiria chunks e embeddings, adicionaria atualização incremental, observabilidade, handoff humano e avaliação contínua de recall/grounding.
+The web UI (`python app.py --web`) uses exactly the same `StoreAgent`: every
+question is routed to catalog, order, policy or handoff without duplicating
+logic.
 
+See [examples/conversations.md](examples/conversations.md) for the required
+scenarios.
 
-## Como o RAG e o catálogo trabalham juntos
+## Why these choices
 
-O fluxo separa duas fontes de verdade. O catálogo (produtos, categorias, promoções, clientes e pedidos) é carregado dos CSVs e consultado com filtros, normalização e joins determinísticos. Assim, preço, estoque, desconto e status de pedido não são adivinhados por similaridade semântica.
+- **Hybrid instead of pure RAG for the catalog.** Price, stock and status need
+  exact filters and joins; semantic similarity gets numbers wrong. The CSVs
+  become deterministic queries and only the policy PDF goes to RAG.
+- **Gemini 3.1 Flash, the cheap model.** Here the LLM only writes over an
+  already-retrieved context — the hard work belongs to the retriever. An
+  expensive model would not improve grounding and would raise the cost of every
+  turn.
+- **Deterministic triggers for human handoff.** A late order, damaged goods or
+  an explicit request for a person have no correct answer in the data; any
+  generated text would be an empty promise. The rule escalates immediately, and
+  the trigger list is visible in the UI.
 
-O manual de políticas é extraído do PDF e dividido em chunks de 1.400 caracteres, com overlap de 180. Cada chunk pode ser recuperado por palavras-chave (termos exatos) ou por similaridade de embeddings Gemini (perguntas com redação diferente). O ranking híbrido envia os melhores chunks ao Gemini 3.1 Flash junto com o histórico. Uma validação local bloqueia valores monetários ausentes do contexto.
+## Use of code assistants
 
-A UI (`python app.py --web`, em `http://127.0.0.1:8000`) usa exatamente o mesmo `StoreAgent`: cada pergunta é roteada para catálogo, pedido ou política sem duplicar a lógica.
+Claude Code (Claude Opus, in the VS Code extension) was used throughout, as a
+pair programmer rather than a code generator: I described the intent and the
+constraint, reviewed each diff, and kept the architectural decisions — the
+structured/RAG split, the cheap model, the narrow handoff triggers — my own. It
+was most useful for mechanical breadth: sweeping the retrieval helpers, keeping
+the regex sets and their readable UI labels in sync, and running the unit tests
+and the conversation evaluation after each change so regressions surfaced
+immediately.
+
+## Known limitations
+
+The database is a local snapshot and there is no real customer authentication.
+The embedding index is rebuilt at process start instead of persisting to
+pgvector/Supabase as in TwinTweaker. The human handoff already detects and
+records the case, but dispatch to the support queue does not exist yet.
+
+With more time I would persist chunks and embeddings, add incremental updates,
+observability, and continuous recall/grounding evaluation.

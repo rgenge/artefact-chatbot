@@ -123,6 +123,36 @@ class StoreAgentTests(unittest.TestCase):
         self.assertIn("15% a 30%", answer)
         self.assertIn("não há uma promoção ativa identificada como Black Friday", answer)
 
+    def test_checkout_flow_preserves_product_and_address(self):
+        agent = StoreAgent(DATA, use_llm=False)
+        policy_queries = []
+        agent.rag.search = lambda query: policy_queries.append(query) or []
+
+        agent.handle("Quais violões estão disponíveis até R$ 2.000?")
+        start = agent.handle("Quero finalizar a compra")
+        self.assertIn("qual modelo", start.lower())
+        self.assertNotIn("proteger seus dados", start.lower())
+
+        selected = agent.handle("amaha C40 Nylon Natural:")
+        self.assertIn("Yamaha C40 Nylon Natural", selected)
+        self.assertIn("R$ 599,90", selected)
+
+        confirmed = agent.handle("Sim isso .")
+        self.assertIn("Yamaha C40 Nylon Natural", confirmed)
+        self.assertIn("nome completo", confirmed)
+
+        address = agent.handle("Rua teste, 112, campo grande,")
+        self.assertIn("Rua teste, 112, campo grande", address)
+        self.assertIn("telefone ou e-mail", address)
+        self.assertIn("pedido ainda não foi criado", address)
+        self.assertTrue(policy_queries)
+
+    def test_checkout_does_not_load_customer_or_order_tables(self):
+        agent = StoreAgent(DATA, use_llm=False)
+        agent.handle("Quero finalizar a compra")
+        self.assertIsNone(agent.store._customers_cache)
+        self.assertIsNone(agent.store._orders_cache)
+        self.assertIsNone(agent.store._order_items_cache)
     def test_accessory_scope_is_explicit(self):
         agent = StoreAgent(DATA, use_llm=False)
         answer = agent.handle("Vocês vendem cabos e palhetas?")

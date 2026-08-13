@@ -30,3 +30,4 @@ tests_ai/results.json
 .idea/
 .DS_Store
 Thumbs.db
+project_rules.md

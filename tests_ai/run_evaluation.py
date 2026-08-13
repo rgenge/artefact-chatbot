@@ -150,6 +150,7 @@ def build_conversations(store: CatalogStore, policy_text: str) -> tuple[list[Con
     takamine = product_named(store, "Takamine GD20")
     yamaha_category = store.category_id_for("violões")
     yamaha = store.brand_products("Yamaha violões", category_id=yamaha_category)
+    yamaha_c40 = product_named(store, "Yamaha C40 Nylon Natural")
     all_violoes = store.search_products("violões", category_id=yamaha_category, limit=100)
     tagima_violoes = store.brand_products("Tagima violões", category_id=yamaha_category)
     active_promotions = store.active_promotions(limit=100)
@@ -338,6 +339,42 @@ def build_conversations(store: CatalogStore, policy_text: str) -> tuple[list[Con
                     must_contain=("instrumentos",),
                     must_not_contain=("organizar catálogo", "final de semana"),
                     note="The assistant must not invent a personal life or roleplay outside the store scope.",
+                ),
+            ),
+        ),
+        Conversation(
+            name="checkout keeps catalog facts and retrieves policy guidance",
+            turns=(
+                Turn(
+                    user="Quais violões estão disponíveis até R$ 2.000?",
+                    source="checkout",
+                    must_contain=("Encontrei 22 violões", "Mostrando 5 opções"),
+                    note="The initial browse remains an exact structured catalog preview.",
+                ),
+                Turn(
+                    user="Quero finalizar a compra",
+                    source="checkout",
+                    must_contain=("qual modelo",),
+                    must_not_contain=("proteger seus dados",),
+                    note="Purchase intent must not be misrouted to order-status privacy handling.",
+                ),
+                Turn(
+                    user="amaha C40 Nylon Natural:",
+                    source="checkout",
+                    must_contain=(yamaha_c40.name, format_brl(store.effective_price(yamaha_c40)), "12 unidade(s)"),
+                    note="A typo/product selection is resolved from the structured catalog.",
+                ),
+                Turn(
+                    user="Sim isso .",
+                    source="checkout",
+                    must_contain=(yamaha_c40.name, "nome completo"),
+                    note="Confirmation preserves the selected product instead of becoming unknown.",
+                ),
+                Turn(
+                    user="Rua teste, 112, campo grande,",
+                    source="checkout",
+                    must_contain=("Rua teste, 112, campo grande", yamaha_c40.name, "telefone ou e-mail"),
+                    note="The address is accepted as checkout data and the missing fields are explicit.",
                 ),
             ),
         ),
