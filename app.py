@@ -155,6 +155,16 @@ HANDOFF_PATTERNS = (
     r"\bprocon\b",
 )
 
+# Versão legível de HANDOFF_PATTERNS, exibida na interface web. Mantenha as duas
+# listas alinhadas: é o que o cliente lê para saber o que aciona um atendente.
+HANDOFF_TRIGGER_LABELS = (
+    ("Pedido atrasado", "meu violão está atrasado"),
+    ("Pedido não entregue", "o pedido não chegou"),
+    ("Produto com avaria", "chegou quebrado"),
+    ("Pedido explícito de atendente", "quero falar com um atendente"),
+    ("Menção a órgão de defesa do consumidor", "vou acionar o Procon"),
+)
+
 
 def normalize(value: Any) -> str:
     text = unicodedata.normalize("NFKD", str(value or ""))
@@ -973,6 +983,7 @@ dados pessoais além do necessário para responder ao próprio cliente.
         customer_id: Optional[int] = None,
         use_llm: bool = True,
         model: Optional[str] = None,
+        handoff_enabled: bool = True,
     ):
         data_path = Path(data_dir)
         self.store = CatalogStore(data_path)
@@ -981,6 +992,9 @@ dados pessoais além do necessário para responder ao próprio cliente.
         self.customer_id = customer_id
         self.history: list[dict[str, str]] = []
         self.use_llm = use_llm
+        # Controlado pelo cliente na interface web; desligado, o agente responde
+        # normalmente em vez de escalar.
+        self.handoff_enabled = handoff_enabled
         self.pending_handoffs: list[dict[str, Any]] = []
         self.last_catalog_products: list[Product] = []
         self.last_catalog_offset = 0
@@ -1013,7 +1027,7 @@ dados pessoais além do necessário para responder ao próprio cliente.
         )
         if catalog_follow_up and previous_user and (self.last_catalog_query or route_message(previous_user, self.store) == "catalog"):
             catalog_message = previous_user + " " + message
-        intent = route_message(catalog_message, self.store)
+        intent = route_message(catalog_message, self.store, allow_handoff=self.handoff_enabled)
 
         if intent == "greeting":
             answer = self._greeting()
@@ -1419,7 +1433,7 @@ def is_injection(message: str) -> bool:
     )
 
 
-def route_message(message: str, store: CatalogStore) -> str:
+def route_message(message: str, store: CatalogStore, *, allow_handoff: bool = True) -> str:
     if not normalize(message):
         return "unknown"
     if is_greeting(message):
@@ -1428,7 +1442,7 @@ def route_message(message: str, store: CatalogStore) -> str:
         return "out_of_scope"
     # Escalação vem antes do catálogo: "meu violão está atrasado" cita um
     # produto, mas é um caso de atendimento humano, não uma busca.
-    if needs_human_handoff(message):
+    if allow_handoff and needs_human_handoff(message):
         return "handoff"
 
     words = keyword_set(message)
