@@ -1,8 +1,32 @@
+# Ambiente e dependências
 .venv/
+venv/
 __pycache__/
 *.py[cod]
-.env
-.pytest_cache/
-desafio_tecnico_ai_eng_artefact.pdf
-data/
+*.egg-info/
 
+# Segredos
+.env
+.env.*
+!.env.example
+
+# Caches de ferramentas
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Dados e artefatos do desafio (não versionados)
+data/
+desafio_tecnico_ai_eng_artefact.pdf
+
+# Saídas geradas pela avaliação automatizada (tests_ai/run_evaluation.py)
+tests_ai/report.md
+tests_ai/results.json
+
+# Editor / sistema operacional
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

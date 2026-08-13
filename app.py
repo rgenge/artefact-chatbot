@@ -883,6 +883,33 @@ class CatalogStore:
             result.append((item["product_id"], product.name if product else "Produto", item["quantity"]))
         return result
 
+    def grounding_for_products(self, products: Iterable[Product]) -> list[RetrievedChunk]:
+        chunks: list[RetrievedChunk] = []
+        for product in products:
+            promotion = self.active_promotion(product)
+            price = self.effective_price(product) if product.available else product.price_brl
+            details = [
+                f"Nome: {product.name}",
+                f"Categoria: {self.category_name(product.category_id)}",
+                f"Preço: {format_brl(price)}",
+                f"Preço original: {format_brl(product.price_brl)}",
+                f"Estoque: {product.stock_quantity}",
+                f"Status: {product.status}",
+                f"Descrição: {product.description}",
+            ]
+            if promotion:
+                details.append(f"Promoção ativa: {promotion.discount_percent:g}% ({promotion.description})")
+            chunks.append(
+                RetrievedChunk(
+                    title=product.name,
+                    source_type="catalog_row",
+                    content="\n".join(details),
+                    score=10.0,
+                    retrieval="structured",
+                )
+            )
+        return chunks
+
     def search_grounding(
         self,
         query: str,
@@ -899,33 +926,7 @@ class CatalogStore:
             include_unavailable=include_unavailable,
             limit=limit,
         )
-        chunks: list[RetrievedChunk] = []
-        for product in products:
-            promotion = self.active_promotion(product)
-            price = self.effective_price(product) if product.available else product.price_brl
-            details = [
-                f"Nome: {product.name}",
-                f"Categoria: {self.category_name(product.category_id)}",
-                f"Preço: {format_brl(price)}",
-                f"Preço original: {format_brl(product.price_brl)}",
-                f"Estoque: {product.stock_quantity}",
-                f"Status: {product.status}",
-                f"Descrição: {product.description}",
-            ]
-            if promotion:
-                details.append(
-                    f"Promoção ativa: {promotion.discount_percent:g}% ({promotion.description})"
-                )
-            chunks.append(
-                RetrievedChunk(
-                    title=product.name,
-                    source_type="catalog_row",
-                    content="\n".join(details),
-                    score=10.0,
-                    retrieval="keyword",
-                )
-            )
-        return chunks
+        return self.grounding_for_products(products)
 
 
 class StoreAgent:
@@ -979,7 +980,7 @@ dados pessoais além do necessário para responder ao próprio cliente.
             return "Pode me contar como posso ajudar?"
         self._remember_customer(message)
         catalog_message = message
-        if re.search(r"\b(?:todos|todas|cada|lista completa|mais modelos)\b", normalize(message)) and self.history:
+        if is_catalog_follow_up(message) and self.history:
             previous_user = next((item["content"] for item in reversed(self.history) if item["role"] == "user"), "")
             if previous_user and route_message(previous_user, self.store) == "catalog":
                 catalog_message = previous_user + " " + message
@@ -1000,8 +1001,8 @@ dados pessoais além do necessário para responder ao próprio cliente.
         else:
             answer, grounding = self._unknown(), []
 
-        if self.use_llm and self.client.enabled and intent in {"catalog", "order", "policy", "unknown"}:
-            generated = self._gemini_answer(message, grounding)
+        if (self.use_llm and self.client.enabled and intent in {"catalog", "order", "policy", "unknown"} and not self._is_structured_catalog_list(intent, grounding)):
+            generated = self._gemini_answer(catalog_message if intent == "catalog" else message, grounding)
             if generated and self._response_is_grounded(generated, grounding):
                 answer = generated
 
@@ -1025,7 +1026,7 @@ dados pessoais além do necessário para responder ao próprio cliente.
             "Quando o cliente pedir todos, quais modelos ou a lista completa, enumere "
             "todos os itens correspondentes presentes no contexto confiável; não reduza a resposta "
             "ao primeiro resultado nem repita uma resposta anterior."
-            if re.search(r"\b(?:todos|todas|quais|lista completa|mais modelos)\b", normalize(message))
+            if re.search(r"\b(?:quais|todos|todas|cada|lista completa|mais modelos|so tem esses|so esses|tem mais|tem outros|sao todos|sao esses)\b", normalize(message))
             else ""
         )
         system = (
@@ -1055,6 +1056,20 @@ dados pessoais além do necessário para responder ao próprio cliente.
             if number and number not in trusted_digits:
                 return False
         return True
+
+    @staticmethod
+    def _is_structured_catalog_list(
+        intent: str, grounding: list[RetrievedChunk]
+    ) -> bool:
+        """Keep exact multi-row catalog answers out of free-form summarization."""
+        return bool(
+            intent == "catalog"
+            and len(grounding) > 1
+            and all(
+                chunk.source_type in {"catalog_row", "catalog_promotion"}
+                for chunk in grounding
+            )
+        )
 
     def _greeting(self) -> str:
         name = f" {self.customer.name.split()[0]}" if self.customer else ""
@@ -1088,7 +1103,7 @@ dados pessoais além do necessário para responder ao próprio cliente.
             message, category_id=category_id, max_price=max_price
         )
         # Brand/category questions list every matching model, not just best_product_match().
-        if brand_products and not query_model_numbers(message):
+        if brand_products and product is None and not query_model_numbers(message):
             brand = normalize(brand_products[0].name).split()[0].title()
             label = self.store.category_name(category_id).lower() if category_id is not None else "produtos"
             lines = [f"Encontrei {len(brand_products)} {label} da {brand} disponíveis:"]
@@ -1097,9 +1112,7 @@ dados pessoais além do necessário para responder ao próprio cliente.
                 price = format_brl(self.store.effective_price(item))
                 suffix = f" ({promotion.discount_percent:g}% off; era {format_brl(item.price_brl)})" if promotion else ""
                 lines.append(f"- {item.name}: {price}{suffix}; {item.stock_quantity} unidade(s) em estoque.")
-            return "\n".join(lines), self.store.search_grounding(
-                message, category_id=category_id, max_price=max_price, limit=len(brand_products)
-            )
+            return "\n".join(lines), self.store.grounding_for_products(brand_products)
 
         if words & {"promocao", "promocoes", "desconto", "descontos", "oferta", "ofertas", "especial", "especiais", "exclusivo", "exclusiva", "black", "friday"} and product is None and category_id is None and max_price is None:
             promotions = self.store.active_promotions()
@@ -1242,8 +1255,10 @@ dados pessoais além do necessário para responder ao próprio cliente.
             answer = "Defeitos de fabricação podem ser tratados em até 30 dias para troca; todos os produtos também têm garantia legal de 90 dias a partir do recebimento. Mau uso, quedas e modificações não autorizadas não são cobertos."
         elif words & {"frete", "entrega", "entregas"}:
             answer = "Na região metropolitana de Campo Grande, o frete é grátis acima de R$ 500 e custa R$ 35 abaixo disso, com prazo de 1 a 3 dias úteis. Para outras cidades, o valor depende do CEP, peso e dimensões."
-        elif words & {"privacidade", "lgpd", "dados"}:
+        elif words & {"privacidade", "lgpd", "dados", "exclusao"}:
             answer = "Os dados são usados para processar pedidos, comunicar status e cumprir obrigações legais; não são compartilhados para marketing sem consentimento. A exclusão pode ser solicitada pelo WhatsApp ou e-mail."
+        elif words & {"black", "friday"}:
+            answer = "A política prevê a campanha Black Friday em novembro, com descontos de 15% a 30% no catálogo. As condições precisam ser confirmadas nas promoções ativas, e os descontos não são cumulativos."
         elif words & {"reclamacao", "reclamar", "problema"}:
             answer = "Sinto muito pelo transtorno. Vou registrar a reclamação e encaminhar para a equipe responsável; o prazo de retorno é de até 24 horas úteis."
         elif chunks:
@@ -1272,6 +1287,13 @@ def is_greeting(message: str) -> bool:
     return bool(re.fullmatch(r"\s*(oi|ola|olá|bom dia|boa tarde|boa noite|hello|hi)[!. ]*", message, re.I))
 
 
+def is_catalog_follow_up(message: str) -> bool:
+    normalized = normalize(message)
+    return bool(re.search(
+        r"\b(?:todos|todas|cada|lista completa|mais modelos?|so tem esses|so esses|tem mais|tem outros|sao todos|sao esses|apenas esses|somente esses)\b",
+        normalized,
+    ))
+
 def is_injection(message: str) -> bool:
     normalized = normalize(message)
     return bool(
@@ -1292,10 +1314,6 @@ def route_message(message: str, store: CatalogStore) -> str:
         return "out_of_scope"
 
     words = keyword_set(message)
-    # Promotion language is catalog intent, never policy intent.
-    if words & {"promocao", "promocoes", "desconto", "descontos", "oferta", "ofertas", "especial", "especiais", "exclusivo", "exclusiva", "black", "friday"}:
-        return "catalog"
-
     accessory_only = bool(words & ACCESSORY_TERMS) and not bool(
         words & {
             "instrumento", "violao", "violoes", "guitarra", "guitarras", "baixo",
@@ -1313,7 +1331,8 @@ def route_message(message: str, store: CatalogStore) -> str:
             "devolucao", "devolver", "arrependimento", "troca", "trocar", "defeito",
             "garantia", "pagamento", "pix", "boleto", "cartao", "horario",
             "expediente", "endereco", "localizacao", "frete", "entrega",
-            "privacidade", "lgpd", "reembolso", "reclamacao", "problema",
+            "privacidade", "lgpd", "dados", "exclusao", "reembolso", "reclamacao", "problema",
+            "politica", "manual", "acumula", "cumulativo",
         }
     )
     if order_signal and (
