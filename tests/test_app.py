@@ -102,6 +102,32 @@ class StoreAgentTests(unittest.TestCase):
         self.assertIn("Sim, há mais violões", more)
         self.assertNotIn("Tagima Memphis AC-39 Nylon Natural", more)
 
+    def test_natural_other_results_follow_up_uses_chat_context(self):
+        agent = StoreAgent(DATA, use_llm=False)
+        greeting = agent.handle("oie")
+        self.assertIn("Empório da Música", greeting)
+
+        first = agent.handle("Quais violões até 800 reais tem?")
+        self.assertIn("Encontrei 9 violões disponíveis até R$ 800,00", first)
+
+        answer = agent.handle("Mostre os outros fazendo favor.")
+        self.assertIn("Sim, há mais violões disponíveis", answer)
+        self.assertIn("Giannini GN-15 Nylon Cedr Natural", answer)
+        self.assertNotIn("Tagima Memphis AC-39 Nylon Natural", answer)
+    def test_budget_catalog_rest_follow_up_uses_next_page(self):
+        agent = StoreAgent(DATA, use_llm=False)
+        first = agent.handle("Quais opções de violões disponíveis custando até R$1000?")
+        self.assertIn("Encontrei 12 violões disponíveis até R$ 1.000,00", first)
+
+        remaining = agent.handle("E o restante? Quais são?")
+        self.assertIn("Sim, há mais violões disponíveis", remaining)
+        self.assertNotIn("Tagima Memphis AC-39 Nylon Natural", remaining)
+        self.assertIn("Tagima Dallas Tuner Aço Natural", remaining)
+
+        last_page = agent.handle("Quero saber o restante dos violões até 1000 reais")
+        self.assertIn("Sim, há mais violões disponíveis", last_page)
+        self.assertIn("Tagima TW-7 7 Cordas Aço Natural", last_page)
+        self.assertNotIn("Tagima Dallas Tuner Aço Natural", last_page)
     def test_brand_follow_up_preserves_category_context(self):
         agent = StoreAgent(DATA, use_llm=False)
         agent.handle("Quais violões tem?")

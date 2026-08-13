@@ -1480,7 +1480,7 @@ dados pessoais além do necessário para responder ao próprio cliente.
                     f"A lista anterior mostrava apenas {shown} opções; posso filtrar por marca, tipo ou faixa de preço.",
                     self.store.grounding_for_products(all_products[:shown]),
                 )
-            if re.search(r"\b(?:tem mais|mais|outros)\b", normalized_query):
+            if re.search(r"\b(?:tem mais|mais|outros|restante|restantes|o que falta|faltam)\b", normalized_query):
                 start_offset = min(self.last_catalog_offset, len(all_products))
                 page = all_products[start_offset:start_offset + 5]
                 if page:
@@ -1612,13 +1612,13 @@ def extract_order_reference(message: str) -> Optional[str]:
 
 
 def is_greeting(message: str) -> bool:
-    return bool(re.fullmatch(r"\s*(oi|ola|olá|bom dia|boa tarde|boa noite|hello|hi)[!. ]*", message, re.I))
+    return bool(re.fullmatch(r"\s*(oi|oie+|ola|olá|bom dia|boa tarde|boa noite|hello|hi)[!. ]*", message, re.I))
 
 
 def is_catalog_follow_up(message: str) -> bool:
     normalized = normalize(message).strip("?!., ")
     return bool(
-        re.search(r"\b(?:todos|todas|cada|lista completa|mais modelos?|so tem esses|so esses|tem mais|tem outros|sao todos|sao esses|apenas esses|somente esses)\b", normalized)
+        re.search(r"\b(?:todos|todas|cada|lista completa|mais modelos?|so tem esses|so esses|tem mais|tem outros|sao todos|sao esses|apenas esses|somente esses|restante|restantes|o que falta|faltam|outros|outras)\b", normalized)
         or re.fullmatch(r"e(?: da| do| das| dos| a| o)? [a-z0-9-]+", normalized)
     )
 

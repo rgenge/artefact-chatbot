@@ -154,6 +154,7 @@ def build_conversations(store: CatalogStore, policy_text: str) -> tuple[list[Con
     yamaha = store.brand_products("Yamaha violões", category_id=yamaha_category)
     yamaha_c40 = product_named(store, "Yamaha C40 Nylon Natural")
     all_violoes = store.search_products("violões", category_id=yamaha_category, limit=100)
+    budget_violoes = store.search_products("violões", category_id=yamaha_category, max_price=1000, limit=100)
     tagima_violoes = store.brand_products("Tagima violões", category_id=yamaha_category)
     active_promotions = store.active_promotions(limit=100)
     unavailable = next(product for product in store.products if not product.available)
@@ -231,6 +232,32 @@ def build_conversations(store: CatalogStore, policy_text: str) -> tuple[list[Con
             ),
         ),
         Conversation(
+            name="budget catalog remaining-results continuation",
+            turns=(
+                Turn(
+                    user="Quais opções de violões disponíveis custando até R$1000?",
+                    source="catalog",
+                    must_contain=(
+                        f"Encontrei {len(budget_violoes)} violões disponíveis até R$ 1.000,00",
+                        "Mostrando 5 opções",
+                    ),
+                ),
+                Turn(
+                    user="E o restante? Quais são?",
+                    source="catalog",
+                    must_contain=("Sim, há mais violões disponíveis", budget_violoes[5].name),
+                    must_not_contain=(budget_violoes[0].name,),
+                    note="A natural request for the remainder advances, rather than resets, the structured page.",
+                ),
+                Turn(
+                    user="Quero saber o restante dos violões até 1000 reais",
+                    source="catalog",
+                    must_contain=("Sim, há mais violões disponíveis", budget_violoes[10].name),
+                    must_not_contain=(budget_violoes[5].name,),
+                    note="An explicit restatement of the same category and budget preserves the current offset.",
+                ),
+            ),
+        ),        Conversation(
             name="brand listing and contextual follow-up",
             turns=(
                 Turn(
