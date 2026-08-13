@@ -29,6 +29,7 @@ from app import (  # noqa: E402
     StoreAgent,
     format_brl,
     normalize,
+    parse_budget,
     parse_number,
 )
 
@@ -560,6 +561,9 @@ def source_blob_for(source: str, store: CatalogStore, policy_text: str) -> str:
 def monetary_grounding_warnings(answer: str, source: str, store: CatalogStore, policy_text: str, user_query: str = "") -> list[str]:
     trusted = normalize(source_blob_for(source, store, policy_text))
     query_amounts = {parse_number(amount) for amount in MONEY_RE.findall(user_query)}
+    budget = parse_budget(user_query)
+    if budget is not None:
+        query_amounts.add(budget)
     warnings: list[str] = []
     for amount in MONEY_RE.findall(answer):
         # A budget supplied by the customer is not a generated catalog fact.
