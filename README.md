@@ -1,166 +1,181 @@
-# Empório da Música — Gemini customer-service agent
+# Empório da Música — grounded Gemini chatbot
 
-Python prototype of the customer-service agent for the Artefact AI Engineer
-challenge. Empório da Música is a fictional musical-instrument store in Campo
-Grande/MS whose team is overloaded with recurring questions: opening hours,
-order status, price and availability.
+A small Python customer-service agent for the Artefact AI Engineer challenge. It
+answers in Brazilian Portuguese and covers catalog, prices, stock, promotions,
+orders, delivery and store policies.
 
-The retrieval split reuses the approach from TwinTweaker, a previous RAG project
-of mine: tabular facts are queried structurally and never embedded, while free
-text goes through hybrid retrieval.
+The design follows the useful split from TwinTweaker:
 
-1. Catalog, promotions and orders are queried structurally from the CSVs.
-2. The PDF manual is split into 1,400-character chunks with 180 of overlap.
-3. The PDF uses hybrid retrieval: deterministic keyword ranking + Gemini
-   embeddings (`gemini-embedding-001`, 768 dimensions).
-4. The retrieved context goes to `gemini-3.1-flash-lite`, which writes short,
-   warm open-ended answers.
-5. Structured catalog lists stay deterministic: the model may not summarise,
-   truncate or invent price/stock rows.
-6. With no key or on a network failure, the local fallback keeps working without
-   inventing price or stock.
+- CSV facts are retrieved deterministically. Product names, prices, stock,
+  promotions and order data never come from vector similarity.
+- The policy PDF is split into overlapping chunks and searched with hybrid
+  keyword + Gemini embedding retrieval.
+- gemini-3.1-flash writes only the short conversational layer over retrieved
+  evidence. Without a key, deterministic offline answers remain available.
 
-The agent replies to customers in Brazilian Portuguese — the store is in Campo
-Grande/MS and that is its persona. This documentation is in English, as required
-for the submission.
+## Fastest evaluation on Linux
 
-## Setup
+The repository includes one Linux runner. It creates .venv, installs
+dependencies, runs the unit/frontend tests, and runs the multi-turn evaluation:
 
 ~~~bash
-python -m venv .venv
-
-# Windows:
-.venv\Scripts\activate
-# macOS / Linux:
-source .venv/bin/activate
-
-pip install -r requirements.txt
+bash ./run.sh
 ~~~
 
-The store data (`data/`) is committed, so the project runs straight after
-cloning. A Gemini key is optional — without one the agent falls back to
-deterministic retrieval and still answers correctly.
+Expected result:
 
-To enable Gemini, copy the example env file (`copy` on Windows, `cp` elsewhere)
-and fill in your key:
+~~~text
+Ran 34 tests ... OK
+Evaluated 42 turns: 42 passed, 0 failed, 0 warnings.
+~~~
+
+The generated evaluation files are tests_ai/report.md and
+tests_ai/results.json.
+
+The runner also supports:
+
+~~~bash
+bash ./run.sh web    # start the browser UI
+bash ./run.sh cli    # start the interactive CLI
+bash ./run.sh live   # run the Gemini-backed evaluation
+~~~
+
+For the UI, open http://127.0.0.1:8000. The browser session keeps one
+conversation history and sends its conversation id to the same StoreAgent
+used by the CLI and tests.
+
+The automation provided in this repository targets Linux. It requires Bash and
+Python 3.10+; no Windows runner is included.
+
+## Optional Gemini configuration
+
+The application runs without a key. To enable Gemini, copy the example file and
+fill in the token:
+
+~~~bash
+cp .env.example .env
+~~~
 
 ~~~env
 GOOGLE_GENERATIVE_AI_API_KEY=your_token
-GEMINI_MODEL=gemini-3.1-flash-lite
+GEMINI_MODEL=gemini-3.1-flash
 GEMINI_EMBEDDING_MODEL=gemini-embedding-001
 GEMINI_EMBEDDING_DIMENSIONS=768
 ~~~
 
-The key never lives in the code. `.env` is already in `.gitignore`.
+.env is ignored by Git. The key is never stored in source code.
 
-## Usage
-
-~~~bash
-python app.py                                              # interactive CLI
-python app.py --message "Quanto custa o Takamine GD20?"    # single query
-python app.py --customer-id 2 --message "Qual o status do pedido 8?"
-python app.py --web                                        # UI at 127.0.0.1:8000
-python app.py --no-llm                                     # no external calls
-~~~
-
-Tests and evaluation:
+Direct commands, after the runner has created the environment:
 
 ~~~bash
-python -m unittest discover -s tests -v    # unit tests
-python tests_ai/run_evaluation.py          # multi-turn conversation evaluation
-python tests_ai/run_evaluation.py --live   # same assertions, through Gemini
+./.venv/bin/python app.py --no-llm
+./.venv/bin/python app.py --message "Quais violões Yamaha estão disponíveis?"
+./.venv/bin/python app.py --customer-id 2 --message "Qual o status do pedido 8?"
+./.venv/bin/python app.py --web --no-llm
 ~~~
-
-The evaluation writes `tests_ai/report.md` and `tests_ai/results.json`. It
-checks every answer against the CSV rows and the policy PDF text, so a
-regression in retrieval fails the run rather than producing plausible prose.
-
-## Technical decisions
-
-| Decision | Choice | Why |
-|---|---|---|
-| Framework | None — standard library, plus `pypdf` to read the manual | The whole problem is routing, retrieval and grounding. An agent framework would add a dependency surface and hide exactly the logic being assessed. Every decision stays inspectable and testable. |
-| Model / provider | Gemini 3.1 Flash Lite via REST | The LLM only writes over already-retrieved context — the hard work belongs to the retriever. A more expensive model would not improve grounding and would raise the cost of every turn. |
-| Retrieval | Hybrid: structured CSV queries + keyword/embedding RAG on the PDF | Price, stock and status need exact filters and joins; semantic similarity gets numbers wrong. Only free-text policy goes to RAG. |
-| Interface | CLI plus a dependency-free browser UI | The CLI keeps the agent scriptable and testable; the UI shows the same `StoreAgent` in a realistic setting. Both call one code path, so neither can drift. |
-| History | In memory, per session, replayed as user/model turns | Enough for multi-turn context ("só esses?", "E da Tagima?") without a database the prototype does not need. |
-| Data treatment | Normalisation, accent/typo tolerance, deterministic joins | Real customers write "yahama" and "violao". Matching happens on normalised text while answers quote the exact catalog row. |
 
 ## Architecture
 
-The flow separates two sources of truth.
+Only app.py is a root application entrypoint. The implementation is split
+into four focused modules:
 
-**Catalog — structured, never RAG.** Products, categories, promotions,
-customers and orders are loaded from the CSVs and queried with filters,
-normalisation and deterministic joins. Price, stock, discount and order status
-are never guessed by semantic similarity. The agent corrects common brand typos,
-reports the total when it shows a five-item preview, and keeps context across
-follow-ups like "só esses?" and "E da Tagima?".
+~~~text
+app.py          CLI entrypoint and compatibility exports
+run.sh          Linux setup, test, evaluation and run commands
+src/
+  catalog.py    CSV loading, exact filters, joins and shared data models
+  rag.py        Gemini REST client and policy-PDF hybrid RAG
+  agent.py      routing, history, checkout/exchange state and answer guards
+  web.py        dependency-free local browser UI
+data/           catalog CSVs, policy PDF and other source data
+tests/          deterministic unit and HTTP frontend tests
+tests_ai/       multi-turn source-backed evaluation and report
+~~~
 
-**Policy manual — hybrid RAG.** Keywords preserve exact terms, codes and rules;
-embeddings retrieve semantically similar phrasings. Price/model/policy questions
-prioritise lexical evidence, while narrative questions may lean on semantic
-similarity. Gemini only writes over the retrieved context, and a deterministic
-guard rejects answers that introduce monetary values absent from that context.
+There is no framework-specific agent abstraction. This keeps the retrieval and
+grounding decisions visible to a reviewer.
 
-**Prompt strategy.** Recent history is replayed to Gemini as user/model turns.
-The system prompt fixes the persona, constrains scope, tone, language and
-length, and forbids inventing price, stock, promotion, deadline or rule. When
-information is missing the agent must say it needs to confirm with the team
-rather than fill the gap.
+## Retrieval and conversation flow
 
-**Refusals stay deterministic.** The model is only asked to rewrite when there
-is retrieved evidence to rewrite from. With no grounding the answer is a
-deterministic refusal — "identify yourself before I show order data", "no rule
-found for that" — and a free rewrite would drop the guarantee it carries.
-Prompt-injection attempts are answered without naming what is protected.
+~~~text
+message + previous turns
+          |
+          v
+  deterministic router
+     /             catalog route    policy route
+     |               |
+exact CSV query   PDF chunks:
+(products,        keywords + embeddings
+promotions,       (when Gemini is enabled)
+orders)
+                  /
+      trusted grounding
+             |
+             v
+   Gemini short rewrite
+   or deterministic fallback
+~~~
 
-**Exchange.** A return/exchange request keeps its own context across turns, so
-the customer can name the product and purchase date afterwards and still get the
-policy window applied, without loading customer or order tables.
+### Catalog path
 
-**Checkout.** Buying is a separate flow from an order lookup: it keeps the
-chosen product, quantity and delivery address across turns, and loads no
-customer or order tables. It deliberately does not create an order — the agent
-says so explicitly rather than implying a purchase was registered.
+Catalog questions use structured filters and joins:
 
-**Human handoff.** A narrow set of deterministic triggers — late delivery,
-non-delivery, damage on arrival, an explicit request for a person, a mention of
-Procon — routes the message to a handoff instead of an answer. A late order or
-damaged goods has no correct answer in the data, so any generated text would be
-an empty promise. The web UI shows the trigger list and lets the customer switch
-escalation off.
+1. normalize accents, common typos and singular/plural forms;
+2. identify category, brand, model, budget and availability;
+3. query the CSV-backed CatalogStore;
+4. build exact grounding rows from the selected products;
+5. format every returned price and stock value deterministically.
 
-Every question is routed to catalog, order, policy, exchange, checkout or
-handoff, and the CLI and web UI share that one path.
+The LLM does not choose which catalog rows to show, change a price, or truncate a
+requested complete list. For broad category searches the response can show a
+small preview and a total; follow-ups such as 'mostre os outros', 'só esses?' or
+'E da Tagima?' reuse the previous catalog context and resolve the next list
+deterministically.
 
-See [examples/conversations.md](examples/conversations.md) for the required
-scenarios — those transcripts are generated by running the agent against live
-Gemini, not written by hand.
+### Policy path
 
-## Use of code assistants
+The policy manual is loaded from data/, extracted page by page and split into
+1,400-character chunks with 180 characters of overlap. Retrieval combines:
 
-Claude Code (Claude Opus, in the VS Code extension) was used throughout, as a
-pair programmer rather than a code generator: I described the intent and the
-constraint, reviewed each diff, and kept the architectural decisions — the
-structured/RAG split, the cheap model, the narrow handoff triggers — my own. It
-was most useful for mechanical breadth: sweeping the retrieval helpers, keeping
-the regex sets and their readable UI labels in sync, and running the unit tests
-and the conversation evaluation after each change so regressions surfaced
-immediately.
+- lexical matching, useful for exact rules, dates, percentages and terms;
+- Gemini gemini-embedding-001 semantic similarity when a key is available;
+- keyword fallback when there is no key or the network is unavailable.
 
-Generating the example transcripts by running the agent, instead of writing them
-by hand, is what exposed three real bugs: a privacy refusal being rewritten away
-by the model, a budget figure parsed as a model number, and a prompt-injection
-attempt answered with an unrelated message. Each is now covered by a test.
+Only retrieved policy context is sent to Gemini for prose generation. If no
+relevant evidence exists, the agent returns a deterministic confirmation-needed
+answer instead of inventing a rule.
 
-## Known limitations
+### History and safety
 
-The database is a local snapshot and there is no real customer authentication —
-`--customer-id` stands in for a verified session. The embedding index is rebuilt
-at process start instead of persisting to pgvector/Supabase. The human handoff
-detects and records the case, but dispatch to a support queue does not exist
-yet, and checkout collects the purchase data without creating an order.
+Each turn is appended to the agent history. Recent user/model turns are replayed
+for contextual follow-ups, while structured state tracks:
 
-With more time I would persist chunks and embeddings, add incremental updates,
-observability, and continuous recall/grounding evaluation.
+- the active catalog query and pagination;
+- exchange product/date;
+- checkout product, quantity and delivery address.
+
+Customer and order tables are loaded only for an authenticated order lookup.
+Checkout does not create an order. Human-handoff triggers such as a late,
+undelivered or damaged order are deterministic and can be disabled in the UI.
+
+## Tests
+
+The test suite checks isolated behavior and realistic conversation flow:
+
+~~~bash
+./.venv/bin/python -m unittest discover -s tests -v
+./.venv/bin/python tests_ai/run_evaluation.py
+~~~
+
+The evaluation compares answers with committed CSV/PDF source data. It checks
+exact catalog rows, totals, promotions, policy evidence, history, privacy,
+checkout and handoff behavior instead of only checking that a response sounds
+plausible.
+
+## Scope and limitations
+
+This is a local prototype. The CSV snapshot is the database, customer id stands
+in for authentication, embeddings are rebuilt at process start, and checkout
+collects information without creating an order or contacting a payment service.
+A production version would persist the index, add real authentication,
+observability and a support queue.
