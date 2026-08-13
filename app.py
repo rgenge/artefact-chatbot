@@ -99,6 +99,10 @@ QUERY_SYNONYMS: dict[str, set[str]] = {
     "exclusiva": {"promocao", "desconto"},
     "black": {"promocao", "promocoes"},
     "friday": {"promocao", "promocoes"},
+    "yahama": {"yamaha"},
+    "descomto": {"desconto"},
+    "descontoo": {"desconto"},
+    "promocaoo": {"promocao", "promocoes"},
 }
 
 ACCESSORY_TERMS = {
@@ -138,6 +142,18 @@ STATUS_LABELS = {
     "delivered": "entregue",
     "cancelled": "cancelado",
 }
+
+# Situações que o agente não resolve sozinho e que devem ir para um atendente.
+# Deliberadamente estreito: "reclamação" genérica continua sendo resposta de
+# política, só escala quando há atraso, avaria ou pedido explícito de humano.
+HANDOFF_PATTERNS = (
+    r"\batras(?:ad[oa]s?|o|os|ou|ando)\b",
+    r"\bnao (?:chegou|chegaram|recebi|veio|vieram|entregaram|foi entregue)\b",
+    r"\b(?:falar|conversar|atendimento) com (?:um |uma )?(?:atendente|humano|humana|pessoa|gerente|vendedor|alguem)\b",
+    r"\b(?:quero|queria|preciso de|passa para) (?:um |uma )?(?:atendente|humano|humana|gerente)\b",
+    r"\b(?:veio|chegou|recebi) (?:o |a )?(?:produto |item |pedido )?(?:quebrad[oa]|danificad[oa]|errad[oa]|amassad[oa])\b",
+    r"\bprocon\b",
+)
 
 
 def normalize(value: Any) -> str:
@@ -816,6 +832,11 @@ class CatalogStore:
             if normalize(product.name).split()
         }
         requested_brands = query_words & brand_terms
+        for token in query_words - brand_terms:
+            if len(token) >= 4:
+                close = difflib.get_close_matches(token, brand_terms, n=1, cutoff=0.78)
+                if close:
+                    requested_brands.add(close[0])
         if not requested_brands:
             return []
         matches = []
@@ -960,6 +981,11 @@ dados pessoais além do necessário para responder ao próprio cliente.
         self.customer_id = customer_id
         self.history: list[dict[str, str]] = []
         self.use_llm = use_llm
+        self.pending_handoffs: list[dict[str, Any]] = []
+        self.last_catalog_products: list[Product] = []
+        self.last_catalog_offset = 0
+        self.last_catalog_label = "produtos"
+        self.last_catalog_query = ""
 
     @property
     def customer(self) -> Optional[Customer]:
@@ -979,11 +1005,14 @@ dados pessoais além do necessário para responder ao próprio cliente.
         if not message:
             return "Pode me contar como posso ajudar?"
         self._remember_customer(message)
+        catalog_follow_up = is_catalog_follow_up(message)
         catalog_message = message
-        if is_catalog_follow_up(message) and self.history:
-            previous_user = next((item["content"] for item in reversed(self.history) if item["role"] == "user"), "")
-            if previous_user and route_message(previous_user, self.store) == "catalog":
-                catalog_message = previous_user + " " + message
+        previous_user = self.last_catalog_query or next(
+            (item["content"] for item in reversed(self.history) if item["role"] == "user"),
+            "",
+        )
+        if catalog_follow_up and previous_user and (self.last_catalog_query or route_message(previous_user, self.store) == "catalog"):
+            catalog_message = previous_user + " " + message
         intent = route_message(catalog_message, self.store)
 
         if intent == "greeting":
@@ -992,8 +1021,13 @@ dados pessoais além do necessário para responder ao próprio cliente.
         elif intent == "out_of_scope":
             answer = self._out_of_scope()
             grounding = []
+        elif intent == "handoff":
+            answer, grounding = self._handoff_answer(message)
         elif intent == "catalog":
             answer, grounding = self._catalog_answer(catalog_message)
+            brand_switch_follow_up = bool(re.fullmatch(r"e(?: da| do| das| dos| a| o)? [a-z0-9-]+", normalize(message).strip("?!., ")))
+            if not catalog_follow_up or brand_switch_follow_up:
+                self.last_catalog_query = catalog_message
         elif intent == "order":
             answer, grounding = self._order_answer(message)
         elif intent == "policy":
@@ -1001,7 +1035,7 @@ dados pessoais além do necessário para responder ao próprio cliente.
         else:
             answer, grounding = self._unknown(), []
 
-        if (self.use_llm and self.client.enabled and intent in {"catalog", "order", "policy", "unknown"} and not self._is_structured_catalog_list(intent, grounding)):
+        if (self.use_llm and self.client.enabled and intent in {"catalog", "order", "policy", "unknown"} and not (intent == "unknown" and not grounding) and not self._is_structured_catalog_list(intent, grounding)):
             generated = self._gemini_answer(catalog_message if intent == "catalog" else message, grounding)
             if generated and self._response_is_grounded(generated, grounding):
                 answer = generated
@@ -1092,6 +1126,40 @@ dados pessoais além do necessário para responder ao próprio cliente.
             "da loja. Pode reformular a dúvida?"
         )
 
+    def _handoff_answer(self, message: str) -> tuple[str, list[RetrievedChunk]]:
+        """Monta o pedido de transferência para um atendente humano.
+
+        NÃO FINALIZADO: o envio real (fila de atendimento, CRM, WhatsApp da
+        loja) ainda não existe. Por enquanto o chamado só é acumulado em
+        self.pending_handoffs e o cliente recebe a confirmação em texto.
+        """
+        customer = self.customer
+        order = self.store.latest_order(self.customer_id) if self.customer_id else None
+        ticket = {
+            "protocol": f"H{len(self.pending_handoffs) + 1:04d}",
+            "message": message,
+            "customer_id": self.customer_id,
+            "customer_name": customer.name if customer else None,
+            "order_id": order.order_id if order else None,
+            "history": list(self.history[-6:]),
+        }
+        self.pending_handoffs.append(ticket)
+        # TODO: despachar o ticket para a fila humana e devolver o protocolo real.
+
+        answer = (
+            f"Sinto muito pelo transtorno. Já estou acionando um atendente da equipe "
+            f"para assumir o seu caso (protocolo {ticket['protocol']})."
+        )
+        if order is not None:
+            answer += f" Vou encaminhar junto os dados do pedido {order.order_id}."
+        elif self.customer_id is None:
+            answer += (
+                " Para agilizar, me informe o número do pedido e o nome ou e-mail "
+                "usado na compra."
+            )
+        answer += " O retorno acontece em até 24 horas úteis, no horário de atendimento."
+        return answer, []
+
     def _catalog_answer(self, message: str) -> tuple[str, list[RetrievedChunk]]:
         category_id = self.store.category_id_for(message)
         max_price = parse_budget(message)
@@ -1106,6 +1174,9 @@ dados pessoais além do necessário para responder ao próprio cliente.
         if brand_products and product is None and not query_model_numbers(message):
             brand = normalize(brand_products[0].name).split()[0].title()
             label = self.store.category_name(category_id).lower() if category_id is not None else "produtos"
+            self.last_catalog_products = brand_products
+            self.last_catalog_offset = len(brand_products)
+            self.last_catalog_label = label
             lines = [f"Encontrei {len(brand_products)} {label} da {brand} disponíveis:"]
             for item in brand_products:
                 promotion = self.store.active_promotion(item)
@@ -1119,7 +1190,7 @@ dados pessoais além do necessário para responder ao próprio cliente.
             if not promotions:
                 return "No momento, não encontrei promoções ativas em produtos disponíveis.", []
             lines = [
-                "Não encontrei uma campanha chamada Black Friday cadastrada, mas estas promoções estão ativas em estoque:"
+                "A política prevê Black Friday em novembro, com descontos de 15% a 30%. No catálogo atual não há uma promoção ativa identificada como Black Friday. Estas promoções estão ativas em estoque:"
                 if words & {"black", "friday"}
                 else "Estas são algumas promoções ativas em estoque:"
             ]
@@ -1173,10 +1244,11 @@ dados pessoais além do necessário para responder ao próprio cliente.
                 self.store.search_grounding(product.name),
             )
 
-        products = self.store.search_products(
-            message, category_id=category_id, max_price=max_price, limit=5
+        all_products = self.store.search_products(
+            message, category_id=category_id, max_price=max_price,
+            limit=max(100, len(self.store.products)),
         )
-        if not products:
+        if not all_products:
             if category_id is not None and max_price is not None:
                 return (
                     f"Não encontrei {self.store.category_name(category_id).lower()} disponíveis até {format_brl(max_price)}.",
@@ -1186,16 +1258,53 @@ dados pessoais além do necessário para responder ao próprio cliente.
 
         label = self.store.category_name(category_id).lower() if category_id is not None else "produtos"
         budget = f" até {format_brl(max_price)}" if max_price is not None else ""
-        lines = [f"Encontrei {label} disponíveis{budget}:"]
+        normalized_query = normalize(message)
+        follow_up = is_catalog_follow_up(message)
+        previous_ids = {item.product_id for item in self.last_catalog_products}
+        current_ids = {item.product_id for item in all_products}
+        same_context = bool(previous_ids) and previous_ids == current_ids
+
+        if category_id is not None and follow_up and same_context:
+            if re.search(r"\b(?:so tem|so esses|sao esses|apenas|somente)\b", normalized_query):
+                shown = min(self.last_catalog_offset or 5, len(all_products))
+                return (
+                    f"Não. Encontrei {len(all_products)} {label} disponíveis{budget}. "
+                    f"A lista anterior mostrava apenas {shown} opções; posso filtrar por marca, tipo ou faixa de preço.",
+                    self.store.grounding_for_products(all_products[:shown]),
+                )
+            if re.search(r"\b(?:tem mais|mais|outros)\b", normalized_query):
+                start_offset = min(self.last_catalog_offset, len(all_products))
+                page = all_products[start_offset:start_offset + 5]
+                if page:
+                    self.last_catalog_offset = start_offset + len(page)
+                    lines = [f"Sim, há mais {label} disponíveis:"]
+                    for item in page:
+                        promotion = self.store.active_promotion(item)
+                        price_text = format_brl(self.store.effective_price(item))
+                        if promotion:
+                            price_text += f" ({promotion.discount_percent:g}% off; era {format_brl(item.price_brl)})"
+                        lines.append(f"- {item.name}: {price_text}; {item.stock_quantity} em estoque.")
+                    return "\n".join(lines), self.store.grounding_for_products(page)
+                return f"Já mostrei todas as {label} disponíveis nesta busca ({len(all_products)} no total).", self.store.grounding_for_products(all_products)
+
+        if category_id is not None:
+            products = all_products[:5]
+            self.last_catalog_products = all_products
+            self.last_catalog_offset = len(products)
+            self.last_catalog_label = label
+            lines = [f"Encontrei {len(all_products)} {label} disponíveis{budget}."]
+            if len(all_products) > len(products):
+                lines.append(f"Mostrando {len(products)} opções; posso listar mais ou filtrar por marca, tipo ou orçamento.")
+        else:
+            products = all_products[:5]
+            lines = [f"Encontrei {len(all_products)} {label} disponíveis{budget}:"]
         for item in products:
             promotion = self.store.active_promotion(item)
             price_text = format_brl(self.store.effective_price(item))
             if promotion:
                 price_text += f" ({promotion.discount_percent:g}% off; era {format_brl(item.price_brl)})"
             lines.append(f"- {item.name}: {price_text}; {item.stock_quantity} em estoque.")
-        return "\n".join(lines), self.store.search_grounding(
-            message, category_id=category_id, max_price=max_price
-        )
+        return "\n".join(lines), self.store.grounding_for_products(products)
 
     def _order_answer(self, message: str) -> tuple[str, list[RetrievedChunk]]:
         reference = extract_order_reference(message)
@@ -1246,15 +1355,15 @@ dados pessoais além do necessário para responder ao próprio cliente.
         elif words & {"endereco", "localizacao", "onde"}:
             answer = "A loja fica na Rua 14 de Maio, 3200, Centro, Campo Grande/MS, CEP 79202-333."
         elif words & {"pagamento", "pix", "boleto", "cartao", "parcelamento"}:
-            answer = "Aceitamos PIX, débito, crédito em até 12x sem juros e boleto. O PIX tem 5% de desconto, mas não é cumulativo com promoções."
+            answer = "Aceitamos PIX (pagamento à vista com 5% de desconto sobre o preço de tabela, mas não é cumulativo), débito, crédito em até 12x sem juros (parcela mínima de R$ 100,00) e boleto à vista. De 4x a 6x, a parcela mínima é R$ 80,00; de 7x a 12x, R$ 100,00. É permitida a combinação de formas de pagamento, como PIX + cartão, para compras acima de R$ 2.000,00."
         elif words & {"devolucao", "devolver", "arrependimento", "reembolso"}:
-            answer = "Em compras online, você pode pedir devolução em até 7 dias corridos após o recebimento, sem justificativa. O produto deve estar sem uso e na embalagem original; o reembolso ocorre na forma de pagamento original em até 10 dias úteis."
+            answer = "Em compras online, você pode pedir devolução em até 7 dias corridos após o recebimento, sem justificativa. O produto deve estar na embalagem original, sem sinais de uso e com todos os acessórios e manuais. O reembolso ocorre na forma de pagamento original em até 10 dias úteis; o frete de devolução é por conta da loja em caso de arrependimento."
         elif words & {"troca", "trocar", "preferencia", "modelo", "cor"}:
             answer = "Trocas por preferência são permitidas em até 7 dias, conforme disponibilidade, com o produto em perfeito estado e na embalagem original."
         elif words & {"defeito", "garantia"}:
-            answer = "Defeitos de fabricação podem ser tratados em até 30 dias para troca; todos os produtos também têm garantia legal de 90 dias a partir do recebimento. Mau uso, quedas e modificações não autorizadas não são cobertos."
+            answer = "Defeitos de fabricação podem ser tratados em até 30 dias corridos para troca. Após esse prazo, o cliente deve acionar a garantia diretamente com o fabricante; a loja pode intermediar. A garantia legal é de 90 dias, e a garantia do fabricante pode variar de 6 meses a 2 anos. Mau uso, quedas, umidade extrema e modificações não autorizadas não são cobertos."
         elif words & {"frete", "entrega", "entregas"}:
-            answer = "Na região metropolitana de Campo Grande, o frete é grátis acima de R$ 500 e custa R$ 35 abaixo disso, com prazo de 1 a 3 dias úteis. Para outras cidades, o valor depende do CEP, peso e dimensões."
+            answer = "Na região metropolitana de Campo Grande, o frete é grátis acima de R$ 500 e custa R$ 35 abaixo disso, com prazo de 1 a 3 dias úteis; a entrega é feita por motoboy próprio; o cliente é contactado por telefone antes do despacho. Para outras cidades, o cálculo depende de CEP, peso e dimensões: PAC leva 5 a 12 dias úteis, SEDEX 2 a 5 e Jadlog 3 a 8, todos com seguro contra extravios."
         elif words & {"privacidade", "lgpd", "dados", "exclusao"}:
             answer = "Os dados são usados para processar pedidos, comunicar status e cumprir obrigações legais; não são compartilhados para marketing sem consentimento. A exclusão pode ser solicitada pelo WhatsApp ou e-mail."
         elif words & {"black", "friday"}:
@@ -1288,11 +1397,16 @@ def is_greeting(message: str) -> bool:
 
 
 def is_catalog_follow_up(message: str) -> bool:
+    normalized = normalize(message).strip("?!., ")
+    return bool(
+        re.search(r"\b(?:todos|todas|cada|lista completa|mais modelos?|so tem esses|so esses|tem mais|tem outros|sao todos|sao esses|apenas esses|somente esses)\b", normalized)
+        or re.fullmatch(r"e(?: da| do| das| dos| a| o)? [a-z0-9-]+", normalized)
+    )
+
+def needs_human_handoff(message: str) -> bool:
     normalized = normalize(message)
-    return bool(re.search(
-        r"\b(?:todos|todas|cada|lista completa|mais modelos?|so tem esses|so esses|tem mais|tem outros|sao todos|sao esses|apenas esses|somente esses)\b",
-        normalized,
-    ))
+    return any(re.search(pattern, normalized) for pattern in HANDOFF_PATTERNS)
+
 
 def is_injection(message: str) -> bool:
     normalized = normalize(message)
@@ -1312,6 +1426,10 @@ def route_message(message: str, store: CatalogStore) -> str:
         return "greeting"
     if is_injection(message):
         return "out_of_scope"
+    # Escalação vem antes do catálogo: "meu violão está atrasado" cita um
+    # produto, mas é um caso de atendimento humano, não uma busca.
+    if needs_human_handoff(message):
+        return "handoff"
 
     words = keyword_set(message)
     accessory_only = bool(words & ACCESSORY_TERMS) and not bool(
@@ -1409,6 +1527,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 
 
 
